@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html lang="es" class="cat-pending">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -46,7 +46,7 @@ h1{font-size:64px;line-height:.95;font-weight:400;letter-spacing:0;margin:0 0 70
 .cat-stage.running{pointer-events:none}
 .cat-stage.gone{display:none}
 .cat-stage .cc{position:absolute;white-space:pre;will-change:transform}
-.cat-stage .cc.red{color:#e22e26}
+.cat-stage .cc.t1{color:#e22e26}.cat-stage .cc.t2{color:#f2d23c}.cat-stage .cc.t3{color:#3ccfe0}.cat-stage .cc.t4{color:#3fc35a}.cat-stage .cc.t5{color:#d64fd0}.cat-stage .cc.t6{color:#3d6ee8}
 .cat-stage:focus-visible{outline:1px dashed var(--muted);outline-offset:6px}
 .tw-caret{position:absolute;left:0;top:0;width:.55em;height:1em;background:var(--fg);opacity:0;pointer-events:none}
 .tw-caret.on{opacity:1;animation:tw-blink .7s steps(1) infinite}
@@ -73,7 +73,8 @@ color:var(--muted);font-size:13px}
 <main>
   <div class="article-meta">Ficción</div>
   <h1>¿Qué es el Arte? - 2/3</h1>
-  <article class="article-content live">
+  <article class="article-content">
+<div class="cat-stage" tabindex="0" role="button" aria-label="Desenredar el dibujo y leer la entrada"></div>
 <p><strong>ARCADIO ROSALES</strong></p>
 <p>Mi nombre es Arcadio Rosales y soy de Bilbao. Admito que he leído la opinión de Pedro y necesito reaccionar ante ella, defender mi postura tan bien como él ha defendido la suya. Tengo cuarenta y seis años, llevo más de la mitad trabajando como marchante de arte y me considero cualificado para tratar este asunto.</p>
 <p>Seré directo: el arte es perversión y provocación. El arte no es un bien de consumo ni entretenimiento. Los museos deberían estar prohibidos. El arte debería estar en cualquier lugar inesperado, donde el golpe de la creatividad deje inconscientes a nuestras emociones y tengamos que refugiarnos en el lecho materno, el lecho nupcial, el lecho de paja, o un lecho artificial ideado exclusivamente para tomar aliento tras experimentar el arte auténtico. Los museos deberían estar vacíos para poder albergar a los heridos por la bala de la creación.</p>
@@ -84,11 +85,1376 @@ Estoy entrando en un tema que se aleja ligeramente de mi réplica, pido disculpa
 <p>El arte es subjetivo, no engañaré a nadie diciendo que mi visión es la correcta y unívoca, porque si hay algo que detesto ser llamado es “mentiroso”. Lo que sí he de advertir es lo seguro que aparenta en sus argumentos, cuando podrían ser fácilmente derruidos si yo lo quisiera.<br>
 Como he dejado constancia al comienzo de este escrito, mi objetivo es dar a conocer otra percepción del arte, distinta a la de Pedro y distinta a la de muchos. Por encima de perversión y provocación, el arte es opinión.</p>
   </article>
+  <button class="redraw" type="button" hidden>Redibujar</button>
 </main>
 <footer>
   <span class="footer-copy">Violeta Sarabia © 2026</span>
   <span></span>
   <a class="footer-back" href="../index.html">Volver</a>
 </footer>
+<script type="application/json" id="entry-art">{"shape": "handwrite", "t": 8.8, "yaw": 0}</script>
+<script>
+/* ===== Núcleo: SDF + raymarching + texto sobre superficie ===== */
+const TAU = Math.PI * 2;
+const smin = (a, b, k) => { const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.min(a, b) - h * h * k * 0.25; };
+const ellipsoid = (cx, cy, cz, rx, ry, rz) => (x, y, z) => {
+  x = (x - cx) / rx; y = (y - cy) / ry; z = (z - cz) / rz;
+  const k0 = Math.sqrt(x * x + y * y + z * z);
+  const k1 = Math.sqrt(x * x / (rx * rx) + y * y / (ry * ry) + z * z / (rz * rz));
+  return k1 < 1e-9 ? -Math.min(rx, ry, rz) : k0 * (k0 - 1) / k1;
+};
+/* cono redondeado (Inigo Quilez): ideal para patas, orejas y cola */
+const rcone = (a, b, r1, r2) => {
+  const bx = b[0] - a[0], by = b[1] - a[1], bz = b[2] - a[2];
+  const l2 = bx * bx + by * by + bz * bz, rr = r1 - r2, a2 = l2 - rr * rr, il2 = 1 / l2;
+  return (x, y, z) => {
+    const px = x - a[0], py = y - a[1], pz = z - a[2];
+    const yy = px * bx + py * by + pz * bz, zz = yy - l2;
+    const qx = px * l2 - bx * yy, qy = py * l2 - by * yy, qz = pz * l2 - bz * yy;
+    const x2 = qx * qx + qy * qy + qz * qz, y2 = yy * yy * l2, z2 = zz * zz * l2;
+    const k = Math.sign(rr) * rr * rr * x2;
+    if (Math.sign(zz) * a2 * z2 > k) return Math.sqrt(x2 + z2) * il2 - r2;
+    if (Math.sign(yy) * a2 * y2 < k) return Math.sqrt(x2 + y2) * il2 - r1;
+    return (Math.sqrt(x2 * a2 * il2) + yy * rr) * il2 - r1;
+  };
+};
+/* grupo con esfera envolvente: si el punto está lejos, devuelve una cota barata */
+const group = (cx, cy, cz, R, fn) => (x, y, z) => {
+  const d = Math.hypot(x - cx, y - cy, z - cz) - R;
+  return d > 0.25 ? d : fn(x, y, z);
+};
+
+/* ===== Forma: gato azul ruso sentado (mira hacia +z) ===== */
+const CAT = {
+  center: [0.1, 0.98, 0.0],  // centro de giro
+  radius: 1.62,              // esfera envolvente
+  top: 2.07,                // altura de las orejas (para repartir el texto)
+  texRadius: 0.56,          // radio del "cilindro" de texto
+  fit: [1.75, 2.1],         // tamaño (ancho, alto) en unidades para encajar en la celda
+  idle: 'sway',             // reposo: balanceo
+  blocks(S, cw, lh) { return [{ cols: Math.max(24, Math.round(TAU * this.texRadius * S / cw)), rows: Math.ceil((this.top + 0.1) * S / lh) + 2 }]; },
+  glyph(px, py, pz, nx, ny, nz, g) {
+    const b = g.blocks[0];
+    let u = (Math.atan2(px - this.center[0], pz - this.center[2]) + 1.0) / TAU; u -= Math.floor(u);
+    const row = Math.max(0, Math.floor((this.top - py) / g.rowH));
+    return b.lines[row % b.lines.length][Math.min(b.T - 1, Math.floor(u * b.T))];
+  },
+  frame(t) {
+    const wag = Math.sin(t * 1.4) * 0.07, wag2 = Math.sin(t * 1.4 - 0.8) * 0.05;
+    const breathe = 1 + Math.sin(t * 1.9) * 0.012;
+    const E = ellipsoid, R = rcone;
+    // cuerpo
+    const haunchL = E(0.34, 0.36, -0.08, 0.31, 0.36, 0.44);
+    const haunchR = E(-0.34, 0.36, -0.08, 0.31, 0.36, 0.44);
+    const rear = E(0, 0.42, -0.10, 0.40, 0.40, 0.48);
+    const chest = R([0, 0.50, 0.0], [0, 1.06 * breathe, 0.12], 0.36, 0.15);
+    const body = group(0, 0.65, -0.05, 0.95, (x, y, z) =>
+      smin(smin(smin(haunchL(x, y, z), haunchR(x, y, z), 0.12), rear(x, y, z), 0.14), chest(x, y, z), 0.2));
+    // cabeza (cuña corta, orejas grandes y separadas)
+    const head = E(0, 1.42, 0.14, 0.42, 0.29, 0.32);
+    const muzzle = E(0, 1.31, 0.42, 0.14, 0.10, 0.11);
+    const earL = R([0.22, 1.60, 0.08], [0.42, 2.02, 0.02], 0.16, 0.03);
+    const earR = R([-0.22, 1.60, 0.08], [-0.42, 2.02, 0.02], 0.16, 0.03);
+    const headG = group(0, 1.5, 0.12, 0.7, (x, y, z) =>
+      smin(smin(smin(head(x, y, z), muzzle(x, y, z), 0.08), earL(x, y, z), 0.05), earR(x, y, z), 0.05));
+    // patas delanteras y traseras
+    const legL = R([0.16, 1.0, 0.2], [0.17, 0.09, 0.36], 0.12, 0.09);
+    const legR = R([-0.16, 1.0, 0.2], [-0.17, 0.09, 0.36], 0.12, 0.09);
+    const pawL = E(0.17, 0.075, 0.43, 0.10, 0.07, 0.14);
+    const pawR = E(-0.17, 0.075, 0.43, 0.10, 0.07, 0.14);
+    const footL = E(0.40, 0.08, 0.10, 0.12, 0.08, 0.28);
+    const footR = E(-0.40, 0.08, 0.10, 0.12, 0.08, 0.28);
+    const legs = group(0, 0.35, 0.25, 0.8, (x, y, z) =>
+      Math.min(Math.min(legL(x, y, z), legR(x, y, z)), Math.min(pawL(x, y, z), pawR(x, y, z)), footL(x, y, z), footR(x, y, z)));
+    // cola enroscada con ligero vaivén
+    const P = [[0.22, 0.20, -0.50], [0.62, 0.22, -0.66], [0.92, 0.55, -0.52], [0.98 + wag, 0.98, -0.36], [0.90 + wag * 2 + wag2, 1.30, -0.32]];
+    const t1 = R(P[0], P[1], 0.15, 0.13), t2 = R(P[1], P[2], 0.13, 0.115),
+      t3 = R(P[2], P[3], 0.115, 0.10), t4 = R(P[3], P[4], 0.10, 0.075);
+    const tail = group(0.55, 0.75, -0.45, 0.72, (x, y, z) =>
+      Math.min(Math.min(t1(x, y, z), t2(x, y, z)), t3(x, y, z), t4(x, y, z)));
+    // ojos: se dejan huecos en el texto
+    const eyes = [[0.17, 1.46, 0.40, 0.08], [-0.17, 1.46, 0.40, 0.08]];
+    return {
+      eyes,
+      sdf(x, y, z) {
+        let d = smin(body(x, y, z), headG(x, y, z), 0.16);
+        d = smin(d, legs(x, y, z), 0.07);
+        d = Math.min(d, tail(x, y, z));
+        return Math.max(d, 0.0 - y);   // suelo plano
+      }
+    };
+  }
+};
+
+/* ===== Texto: ajuste por palabras + justificado a N columnas ===== */
+function layoutText(text, cols, rows, start = 0) {
+  const words = text.replace(/\s+/g, ' ').trim().split(' ');
+  const lines = []; let i = Math.floor(start * words.length), guard = 0;
+  while (lines.length < rows && guard++ < 100000) {
+    let line = [], len = 0;
+    while (true) {
+      const w = words[i % words.length];
+      const add = (line.length ? 1 : 0) + w.length;
+      if (len + add > cols && line.length) break;
+      if (w.length > cols) { line.push(w.slice(0, cols)); len = cols; i++; break; }
+      line.push(w); len += add; i++;
+      if (line.length > 1 && len >= cols) break;
+    }
+    let gaps = line.length - 1, extra = cols - len, s = line[0];
+    for (let g = 0; g < gaps; g++) {
+      const n = 1 + Math.floor(extra / gaps) + (g < extra % gaps ? 1 : 0);
+      s += ' '.repeat(n) + line[g + 1];
+    }
+    lines.push(s.padEnd(cols, ' '));
+  }
+  return lines;
+}
+
+/* ===== Render de un fotograma a una rejilla de caracteres ===== */
+const LEVELS = 5;
+const mul = (A, B) => A.map((r, i) => [0, 1, 2].map(j => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j]));
+function renderFrame(shape, st, out) {
+  const { cols, rows, cw, lh, S, yaw, pitch, t, blocks } = st;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), pt = pitch + (shape.basePitch || 0), cp = Math.cos(pt), sp = Math.sin(pt);
+  const ro = shape.roll || 0, cr = Math.cos(ro), sr = Math.sin(ro);
+  // R = Rz(roll)·Rx(pitch)·Ry(yaw)   (objeto → vista); su transpuesta lleva vista → objeto
+  const RZ = [[cr, -sr, 0], [sr, cr, 0], [0, 0, 1]], RY = [[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]];
+  let m;
+  if (shape.tumble) {          // el objeto está inclinado (roll + pitch base) y gira sobre el eje vertical de la pantalla
+    const cb = Math.cos(shape.basePitch), sb = Math.sin(shape.basePitch), cpm = Math.cos(pitch), spm = Math.sin(pitch);
+    m = mul(mul(mul([[1, 0, 0], [0, cpm, -spm], [0, spm, cpm]], RY), RZ), [[1, 0, 0], [0, cb, -sb], [0, sb, cb]]);
+  } else m = mul(mul(RZ, [[1, 0, 0], [0, cp, -sp], [0, sp, cp]]), RY);
+  const inv = (x, y, z) => [m[0][0] * x + m[1][0] * y + m[2][0] * z, m[0][1] * x + m[1][1] * y + m[2][1] * z, m[0][2] * x + m[1][2] * y + m[2][2] * z];
+  const C = shape.center, BR = shape.radius;
+  const dir = inv(0, 0, -1);
+  const f = shape.frame(t, dir), sdf = f.sdf;                   // la forma puede saber desde dónde se la mira (p. ej. la habitación)
+  const L = (() => { const v = shape.light || [-0.45, 0.65, 0.62], n = Math.hypot(...v); return v.map(a => a / n); })();
+  if (st.tints) st.tints.fill(0);
+  const Lo = inv(L[0], L[1], L[2]);
+  const g = { blocks, S, cw, lh, rowH: lh / S };
+  out.fill(0);
+  for (let r = 0; r < rows; r++) {
+    const vy = ((rows * lh) / 2 - (r + 0.5) * lh) / S;
+    for (let c = 0; c < cols; c++) {
+      const vx = ((c + 0.5) * cw - (cols * cw) / 2) / S;
+      const o = inv(vx, vy, 3); o[0] += C[0]; o[1] += C[1]; o[2] += C[2];
+      const ox = o[0] - C[0], oy = o[1] - C[1], oz = o[2] - C[2];
+      const b = ox * dir[0] + oy * dir[1] + oz * dir[2];
+      const disc = b * b - (ox * ox + oy * oy + oz * oz - BR * BR);
+      if (disc < 0) continue;
+      let tt = Math.max(0, -b - Math.sqrt(disc)); const tEnd = -b + Math.sqrt(disc);
+      let hit = false, px = 0, py = 0, pz = 0;
+      for (let i = 0; i < 40 && tt < tEnd; i++) {
+        px = o[0] + dir[0] * tt; py = o[1] + dir[1] * tt; pz = o[2] + dir[2] * tt;
+        const d = sdf(px, py, pz);
+        if (d < 0.006) { hit = true; break; }
+        tt += d * 0.95;
+      }
+      if (!hit) continue;
+      if (f.hole && f.hole(px, py, pz)) continue;                 // huecos (cráteres): sin carácter
+      if (f.eyes) { let eye = false; for (const e of f.eyes) if (Math.hypot(px - e[0], py - e[1], pz - e[2]) < e[3]) { eye = true; break; } if (eye) continue; }
+      const h = 0.012, k1 = sdf(px + h, py - h, pz - h), k2 = sdf(px - h, py - h, pz + h), k3 = sdf(px - h, py + h, pz - h), k4 = sdf(px + h, py + h, pz + h);
+      let nx = k1 - k2 - k3 + k4, ny = -k1 - k2 + k3 + k4, nz = -k1 + k2 - k3 + k4;
+      const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+      const vxn = m[0][0] * nx + m[0][1] * ny + m[0][2] * nz;
+      const vyn = m[1][0] * nx + m[1][1] * ny + m[1][2] * nz;
+      const vzn = m[2][0] * nx + m[2][1] * ny + m[2][2] * nz;
+      let lam = Math.max(0, vxn * L[0] + vyn * L[1] + vzn * L[2]);
+      if (f.shadow && f.shadow(px, py, pz, Lo)) lam *= 0.25;     // sombra proyectada (p. ej. el planeta sobre los anillos)
+      const rim = Math.pow(1 - Math.max(0, vzn), 2.2);
+      const br = Math.min(1, 0.26 + 0.66 * lam + 0.3 * rim);
+      let lvl = 1 + Math.floor(br * LEVELS); if (lvl > LEVELS) lvl = LEVELS;
+      if (f.tone) lvl = Math.max(1, Math.min(LEVELS, lvl + f.tone(px, py, pz)));   // contraste entre partes (planeta / anillos)
+      let ch = shape.glyph(px, py, pz, nx, ny, nz, g, f);
+      if (f.blank && f.blank(px, py, pz)) ch = ' ';                 // zonas que se dibujan solo con puntos tenues
+      if (ch === ' ') { ch = '·'; lvl = Math.max(1, lvl - 1); }   // los espacios entre palabras se marcan con un punto tenue
+      out[r * cols + c] = lvl;
+      st.chars[r * cols + c] = ch;
+      if (st.tints && f.tint) { const tv = f.tint(px, py, pz); if (tv) st.tints[r * cols + c] = tv === true ? 1 : tv; }   // letras de color (1 = rojo; ver la paleta)
+    }
+  }
+  // partículas (gotas, espuma): letras sueltas proyectadas sobre la rejilla, por delante de la superficie
+  if (f.particles) {
+    const LET = blocks._let || (blocks._let = blocks[0].lines.join('').replace(/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g, '') || 'o');
+    for (const p of f.particles) {
+      const x = p[0] - C[0], y = p[1] - C[1], z = p[2] - C[2];
+      const vx = m[0][0] * x + m[0][1] * y + m[0][2] * z, vy = m[1][0] * x + m[1][1] * y + m[1][2] * z, vz = m[2][0] * x + m[2][1] * y + m[2][2] * z;
+      if (f.occluder && vz < 0 && Math.hypot(vx, vy) < f.occluder) continue;   // por detrás del planeta: no se ve
+      const c = Math.round((vx * S + cols * cw / 2) / cw - 0.5), r = Math.round((rows * lh / 2 - vy * S) / lh - 0.5);
+      if (c < 0 || c >= cols || r < 0 || r >= rows) continue;
+      out[r * cols + c] = p[3]; st.chars[r * cols + c] = LET[p[4] % LET.length];
+      if (st.tints) st.tints[r * cols + c] = p[5] | 0;
+    }
+  }
+}
+
+/* ===== Forma: el número 85 (dos cifras en 3D, texto por delante y por detrás) ===== */
+const capsule = (a, b, r) => {
+  const bx = b[0] - a[0], by = b[1] - a[1], bz = b[2] - a[2], l2 = Math.max(1e-6, bx * bx + by * by + bz * bz);
+  return (x, y, z) => {
+    const px = x - a[0], py = y - a[1], pz = z - a[2];
+    const h = Math.max(0, Math.min(1, (px * bx + py * by + pz * bz) / l2));
+    return Math.hypot(px - bx * h, py - by * h, pz - bz * h) - r;
+  };
+};
+const ring2 = (cx, cy, rx, ry, r) => { const m = Math.min(rx, ry); return (x, y, z) => Math.hypot((Math.hypot((x - cx) / rx, (y - cy) / ry) - 1) * m, z) - r; };
+const N85 = {
+  center: [0.12, 1.0, 0], radius: 1.95, top: 2.1, x0: -1.3, width: 2.65,
+  fit: [2.55, 2.25], idle: 'sway',
+  blocks(S, cw, lh) { const c = Math.ceil(this.width * S / cw) + 1, r = Math.ceil(2.2 * S / lh) + 2; return [{ cols: c, rows: r }, { cols: c, rows: r }]; },
+  glyph(px, py, pz, nx, ny, nz, g) {
+    const b = g.blocks[nz >= 0 ? 0 : 1];
+    let col = Math.floor((px - this.x0) / (g.cw / g.S)); if (nz < 0) col = b.T - 1 - col;   // por detrás el texto se lee del derecho
+    const row = Math.max(0, Math.floor((this.top - py) / g.rowH));
+    return b.lines[row % b.lines.length][((col % b.T) + b.T) % b.T];
+  },
+  frame() {
+    if (this._f) return this._f;
+    const R = 0.13, ox = 0.12;
+    const top8 = ring2(-0.55, 1.50, 0.30, 0.34, R), bot8 = ring2(-0.55, 0.57, 0.38, 0.43, R);
+    const eight = (x, y, z) => smin(group(-0.55, 1.5, 0, 0.62, top8)(x, y, z), group(-0.55, 0.57, 0, 0.7, bot8)(x, y, z), 0.1);
+    // el 5: barra superior + vertical, y panza en arco (arco elíptico exacto con dos remates)
+    const bar = capsule([0.38 + ox, 1.87, 0], [1.05 + ox, 1.87, 0], R), vert = capsule([0.40 + ox, 1.87, 0], [0.34 + ox, 1.10, 0], R);
+    const cx = 0.62 + ox, cy = 0.64, rx = 0.47, ry = 0.50, a0 = 128 * Math.PI / 180, a1 = -150 * Math.PI / 180, m = Math.min(rx, ry);
+    const e0 = [cx + rx * Math.cos(a0), cy + ry * Math.sin(a0)], e1 = [cx + rx * Math.cos(a1), cy + ry * Math.sin(a1)];
+    const arc = (x, y, z) => {
+      const th = Math.atan2((y - cy) / ry, (x - cx) / rx);
+      if (th <= a0 && th >= a1) return Math.hypot((Math.hypot((x - cx) / rx, (y - cy) / ry) - 1) * m, z) - R;
+      return Math.min(Math.hypot(x - e0[0], y - e0[1], z), Math.hypot(x - e1[0], y - e1[1], z)) - R;
+    };
+    const five = (x, y, z) => smin(group(0.85, 1.6, 0, 0.7, (x, y, z) => smin(bar(x, y, z), vert(x, y, z), 0.06))(x, y, z), group(cx, cy, 0, 0.8, arc)(x, y, z), 0.06);
+    this._f = { sdf: (x, y, z) => smin(eight(x, y, z), five(x, y, z), 0.04) };
+    return this._f;
+  }
+};
+
+/* ===== Forma: Saturno (anillo fino; al girar, el anillo pasa de inclinarse hacia arriba a hacia abajo) ===== */
+const SATURN = {
+  center: [0, 0, 0], radius: 1.65, basePitch: 0.6, roll: 0.38, tumble: true,
+  fit: [3.0, 2.1], idle: 'sway', sway: [0.1, 1.05, 0.5], stars: 0.018,
+  blocks(S, cw, lh) {
+    return [{ cols: Math.max(20, Math.round(TAU * 0.66 * S / cw)), rows: Math.ceil(1.4 * S / lh) + 2 },
+            { cols: Math.max(40, Math.round(TAU * 1.1 * S / cw)), rows: Math.ceil(0.5 * S / lh) + 2 }];
+  },
+  glyph(px, py, pz, nx, ny, nz, g, f) {
+    if (!f.isRing(px, py, pz)) {
+      const b = g.blocks[0];
+      let u = (Math.atan2(px, pz) + 1.0) / TAU; u -= Math.floor(u);
+      const row = Math.max(0, Math.floor((0.7 - py) / g.rowH));
+      return b.lines[row % b.lines.length][Math.min(b.T - 1, Math.floor(u * b.T))];
+    }
+    const b = g.blocks[1];                       // anillo: el texto sigue la órbita
+    let u = Math.atan2(pz, px) / TAU; u -= Math.floor(u);
+    const row = Math.max(0, Math.floor((Math.hypot(px, pz) - 0.95) / g.rowH));
+    return b.lines[row % b.lines.length][Math.min(b.T - 1, Math.floor(u * b.T))];
+  },
+  frame() {
+    if (this._f) return this._f;
+    const box = (dx, dy) => Math.hypot(Math.max(dx, 0), Math.max(dy, 0)) + Math.min(Math.max(dx, dy), 0);
+    const planet = (x, y, z) => Math.hypot(x, y, z) - 0.66;
+    const rings = (x, y, z) => { const r = Math.hypot(x, z), dy = Math.abs(y) - 0.022; return Math.min(box(Math.abs(r - 1.07) - 0.1, dy), box(Math.abs(r - 1.30) - 0.045, dy)); };
+    this._f = {
+      sdf: (x, y, z) => Math.min(planet(x, y, z), rings(x, y, z)),
+      isRing: (x, y, z) => rings(x, y, z) < planet(x, y, z),
+      tone: (x, y, z) => (rings(x, y, z) < planet(x, y, z) ? 1 : 0),
+      shadow(x, y, z, L) {
+        if (Math.hypot(x, z) < 0.7 && Math.abs(y) > 0.3) return false;
+        const b = x * L[0] + y * L[1] + z * L[2], c = x * x + y * y + z * z - 0.4356;
+        return b < 0 && b * b - c > 0;
+      }
+    };
+    return this._f;
+  }
+};
+
+/* ===== Ayudas para formas "planas con volumen": el texto se proyecta por delante, por detrás, por los lados y por arriba ===== */
+const rbox = (cx, cy, cz, hx, hy, hz, r) => (x, y, z) => {
+  const qx = Math.abs(x - cx) - (hx - r), qy = Math.abs(y - cy) - (hy - r), qz = Math.abs(z - cz) - (hz - r);
+  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, Math.max(qy, qz)), 0) - r;
+};
+const smooth01 = u => { u = Math.max(0, Math.min(1, u)); return u * u * (3 - 2 * u); };
+function planar(def) {   // def: {x0,width,z0,depth,top,height}
+  return {
+    blocks(S, cw, lh) {
+      const c = Math.ceil(def.width * S / cw) + 1, r = Math.ceil(def.height * S / lh) + 2;
+      const cs = Math.ceil(def.depth * S / cw) + 1, rt = Math.ceil(def.depth * S / lh) + 2;
+      return [{ cols: c, rows: r }, { cols: c, rows: r }, { cols: cs, rows: r }, { cols: c, rows: rt }];
+    },
+    glyph(px, py, pz, nx, ny, nz, g) {
+      const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz), cwW = g.cw / g.S, rowH = g.rowH;
+      let bi, col, row;
+      if (ay > ax && ay > az) { bi = 3; col = (px - def.x0) / cwW; row = (def.z0 + def.depth - pz) / rowH; }
+      else if (ax > az) { bi = 2; col = nx > 0 ? (def.z0 + def.depth - pz) / cwW : (pz - def.z0) / cwW; row = (def.top - py) / rowH; }
+      else { bi = nz >= 0 ? 0 : 1; col = (px - def.x0) / cwW; if (nz < 0) col = g.blocks[1].T - 1 - col; row = (def.top - py) / rowH; }
+      const b = g.blocks[bi]; col = Math.floor(col); row = Math.max(0, Math.floor(row));
+      return b.lines[row % b.lines.length][((col % b.T) + b.T) % b.T];
+    }
+  };
+}
+
+/* ===== Forma: arco lanzando una flecha hacia un corazón ===== */
+const heart2 = (px, py) => {
+  px = Math.abs(px);
+  if (py + px > 1) { const dx = px - 0.25, dy = py - 0.75; return Math.sqrt(dx * dx + dy * dy) - Math.SQRT2 / 4; }
+  const m = 0.5 * Math.max(px + py, 0), a = px, b = py - 1, dx = px - m, dy = py - m;
+  return Math.sqrt(Math.min(a * a + b * b, dx * dx + dy * dy)) * Math.sign(px - py);
+};
+const ARCHERY = Object.assign({
+  center: [-0.2, -0.2, 0], radius: 2.3, fit: [3.3, 2.7], idle: 'sway', sway: [0.3, 0.35, 0.5], swing: 0.9,
+  frame(t) {
+    const PHI = 0.6, c = Math.cos(PHI), s = Math.sin(PHI), D = 1.25, H = [0.6, 0.4], O = [H[0] - D * c, H[1] - D * s];
+    const p = ((t + 1.1) / 3.6) % 1, fp = smooth01(p / 0.62), L0 = 0.95, xt0 = -1.1, xt1 = D - 0.2 - L0;
+    // tras clavarse, la flecha se hunde en el corazón: la punta sigue entrando y la cola la alcanza hasta desaparecer
+    const sink = smooth01((p - 0.62) / 0.2), L = L0 * (1 - sink), xt = xt0 + (xt1 - xt0) * fp + L0 * sink + 0.12 * sink, gone = sink > 0.97;
+    const bump = p > 0.62 ? Math.exp(-(p - 0.62) * 12) * 0.13 : 0, k = 1.22 * (1 + 0.03 * Math.sin(t * 4.5) + bump);
+    const R = 0.72, th = 60 * Math.PI / 180, grip = -0.75, cx = grip - R, rb = 0.095;
+    const tipx = cx + R * Math.cos(th), tipy = R * Math.sin(th), e0 = [tipx, tipy], e1 = [tipx, -tipy];
+    const string = capsule([tipx, tipy, 0], [tipx, -tipy, 0], 0.04), gripC = capsule([grip, -0.16, 0], [grip, 0.16, 0], 0.13);
+    const shaft = capsule([xt, 0, 0], [xt + L - 0.1, 0, 0], 0.075), tip = rcone([xt + L - 0.24, 0, 0], [xt + L, 0, 0], 0.17, 0.01);
+    const fins = [ellipsoid(xt + 0.1, 0.13, 0, 0.15, 0.1, 0.02), ellipsoid(xt + 0.1, -0.13, 0, 0.15, 0.1, 0.02), ellipsoid(xt + 0.1, 0, 0.13, 0.15, 0.02, 0.1), ellipsoid(xt + 0.1, 0, -0.13, 0.15, 0.02, 0.1)];
+    const arrow = gone ? () => 1e9 : group(xt + 0.5, 0, 0, 0.75, (X, Y, Z) => Math.min(shaft(X, Y, Z), tip(X, Y, Z), fins[0](X, Y, Z), fins[1](X, Y, Z), fins[2](X, Y, Z), fins[3](X, Y, Z)));
+    const bowArrow = (x, y, z) => {
+      const dx = x - O[0], dy = y - O[1], X = dx * c + dy * s, Y = -dx * s + dy * c;
+      let d;
+      if (Math.abs(Math.atan2(Y, X - cx)) <= th) d = Math.hypot(Math.hypot(X - cx, Y) - R, z) - rb;
+      else d = Math.min(Math.hypot(X - e0[0], Y - e0[1], z), Math.hypot(X - e1[0], Y - e1[1], z)) - rb;
+      return Math.min(d, string(X, Y, z), gripC(X, Y, z), arrow(X, Y, z));
+    };
+    const heart = (x, y, z) => {
+      const d2 = heart2((x - H[0]) / k, (y - H[1]) / k + 0.55) * k, wx = d2 + 0.09, wy = Math.abs(z) - 0.15;
+      return Math.min(Math.max(wx, wy), 0) + Math.hypot(Math.max(wx, 0), Math.max(wy, 0)) - 0.09;
+    };
+    return { sdf: (x, y, z) => Math.min(group(-0.45, -0.15, 0, 1.45, bowArrow)(x, y, z), group(H[0], H[1], 0, 0.85, heart)(x, y, z)) };
+  }
+}, planar({ x0: -1.7, width: 3.0, z0: -0.3, depth: 0.6, top: 0.8, height: 1.9 }));
+
+/* ===== Forma: cordillera irregular con un avión que la sobrevuela ===== */
+const MOUNTAINS = {
+  center: [0.03, 1.2, 0], radius: 2.8, fit: [3.7, 2.6], idle: 'sway', sway: [0.4, 0.35, 0.5],
+  blocks(S, cw, lh) {
+    return [{ cols: Math.max(30, Math.round(TAU * 1.0 * S / cw)), rows: Math.ceil(2.2 * S / lh) + 2 },
+            { cols: Math.ceil(2.6 * S / cw) + 1, rows: Math.ceil(2.6 * S / lh) + 2 }];
+  },
+  glyph(px, py, pz, nx, ny, nz, g) {
+    if (py > 1.95) {                                  // avión: texto plano
+      const b = g.blocks[1], col = Math.floor((px + 1.3) / (g.cw / g.S));
+      return b.lines[Math.max(0, Math.floor((2.6 - py) / g.rowH) + (nz < 0 ? 9 : 0)) % b.lines.length][((col % b.T) + b.T) % b.T];
+    }
+    const b = g.blocks[0];                            // la cordillera: el texto la envuelve
+    let u = (Math.atan2(px, pz) + 1.0) / TAU; u -= Math.floor(u);
+    const row = Math.max(0, Math.floor((1.95 - py) / g.rowH));
+    return b.lines[row % b.lines.length][Math.min(b.T - 1, Math.floor(u * b.T))];
+  },
+  // cumbres: [x, z, altura, radio de la base, desplazamiento de la cima]
+  peaks: [[-1.12, 0.18, 1.16, 0.62, 0.12], [-0.72, -0.22, 1.86, 0.78, -0.1], [-0.2, 0.3, 1.0, 0.5, 0.06],
+          [0.28, -0.12, 1.52, 0.7, 0.14], [0.72, 0.28, 0.86, 0.46, -0.08], [1.18, -0.05, 1.3, 0.6, 0.1]],
+  frame(t) {
+    if (!this._m) {
+      const cones = this.peaks.map(([x, z, h, r, sh]) => rcone([x, -0.05, z], [x + sh, h, z - sh * 0.6], r, 0.035));
+      // aristas y contrafuertes: la silueta deja de ser un triángulo limpio
+      const ridges = [];
+      for (let i = 0; i + 1 < this.peaks.length; i++) {
+        const A = this.peaks[i], B = this.peaks[i + 1], h = Math.min(A[2], B[2]) * (0.5 + 0.12 * ((i * 7) % 3));
+        ridges.push(rcone([(A[0] + B[0]) / 2, -0.05, (A[1] + B[1]) / 2 + 0.1], [(A[0] + B[0]) / 2 + 0.05, h, (A[1] + B[1]) / 2 - 0.05], (A[3] + B[3]) * 0.42, 0.05));
+      }
+      const all = cones.concat(ridges);
+      this._m = group(0.03, 0.7, 0, 2.3, (x, y, z) => {
+        let d = 1e9;
+        for (let i = 0; i < all.length; i++) d = smin(d, all[i](x, y, z), 0.16);
+        d += 0.045 * Math.sin(x * 7.3 + z * 2.1) * Math.cos(y * 5.7 - x * 1.9);   // relieve: las laderas no quedan lisas
+        return Math.max(d, -y);
+      });
+    }
+    const mount = this._m;
+    const a = t * 0.7, r = 1.3, pos = [0.05 + r * Math.cos(a), 2.3 + 0.06 * Math.sin(t * 1.3), r * Math.sin(a) * 0.9];
+    const vx = -Math.sin(a), vz = Math.cos(a) * 0.9, psi = Math.atan2(-vz, vx), cps = Math.cos(psi), sps = Math.sin(psi), bank = -0.28, cb = Math.cos(bank), sb = Math.sin(bank);
+    const ps = 1.55, P = (a1, b1, c1, d1, e1, f1) => ellipsoid(a1 * ps, b1 * ps, c1 * ps, d1 * ps, e1 * ps, f1 * ps);
+    const fus = P(0, 0, 0, 0.40, 0.075, 0.075), wing = P(0.04, 0, 0, 0.12, 0.016, 0.48), fin = P(-0.33, 0.1, 0, 0.1, 0.1, 0.016), stab = P(-0.33, 0.015, 0, 0.07, 0.014, 0.19), cock = P(0.12, 0.07, 0, 0.1, 0.04, 0.045);
+    const plane = (x, y, z) => {
+      const dx = x - pos[0], dy = y - pos[1], dz = z - pos[2];
+      const xl = dx * cps - dz * sps, zl0 = dx * sps + dz * cps, yl = dy * cb - zl0 * sb, zl = dy * sb + zl0 * cb;
+      return Math.min(fus(xl, yl, zl), wing(xl, yl, zl), fin(xl, yl, zl), stab(xl, yl, zl), cock(xl, yl, zl));
+    };
+    return { sdf: (x, y, z) => Math.min(mount(x, y, z), group(pos[0], pos[1], pos[2], 0.9, plane)(x, y, z)), tone: (x, y, z) => (y > 1.95 ? 1 : 0) };
+  }
+};
+
+/* ===== Forma: un diván tipo chaise longue (brazo enrollado a la izquierda, respaldo que baja en curva, pie abierto) ===== */
+const COUCH = Object.assign({
+  center: [-0.05, 0.68, 0], radius: 1.9, basePitch: 0.22, fit: [3.2, 2.0], idle: 'sway', sway: [0.12, 0.28, 0.5],
+  frame() {
+    if (this._f) return this._f;
+    const plinth = rbox(0.02, 0.32, 0, 1.24, 0.11, 0.42, 0.06);              // base
+    const seat = rbox(0.14, 0.52, 0.01, 1.12, 0.11, 0.42, 0.1);              // cojín del asiento
+    const panel = rbox(-1.12, 0.62, 0, 0.14, 0.38, 0.42, 0.08);              // brazo: panel vertical
+    const scroll = capsule([-1.2, 0.98, -0.4], [-1.2, 0.98, 0.42], 0.17);    // brazo: voluta enrollada hacia fuera
+    const flare = capsule([-1.26, 0.6, 0.42], [-1.2, 0.95, 0.42], 0.07);     // borde delantero del brazo, abriéndose
+    // respaldo: sube desde el brazo, hace una joroba y baja en curva hasta el asiento
+    const backH = x => x < -0.5 ? 1.32 - 0.22 * Math.pow(Math.min(1, (-0.5 - x) / 0.6), 2)
+                                : 0.6 + 0.72 * (1 - smooth01((x + 0.5) / 1.3));
+    const back = (x, y, z) => {
+      const d = Math.max(Math.max((y - backH(x)) * 0.7, 0.42 - y), Math.max(Math.abs(z + 0.3) - 0.12, Math.max(x - 0.85, -1.15 - x)));
+      return d - 0.05;
+    };
+    const legs = [[-1.08, -0.32, -1], [-1.08, 0.32, -1], [1.1, -0.32, 1], [1.1, 0.32, 1]].map(([x, z, sx]) => rcone([x, 0.24, z], [x + sx * 0.06, 0.0, z], 0.07, 0.045));
+    this._f = { sdf: (x, y, z) => {
+      let d = smin(plinth(x, y, z), seat(x, y, z), 0.04);
+      d = smin(d, panel(x, y, z), 0.08); d = smin(d, scroll(x, y, z), 0.1); d = smin(d, flare(x, y, z), 0.05);
+      d = smin(d, back(x, y, z), 0.1);
+      for (let i = 0; i < 4; i++) d = Math.min(d, legs[i](x, y, z));
+      return Math.max(d, -y);
+    } };
+    return this._f;
+  }
+}, planar({ x0: -1.5, width: 2.9, z0: -0.5, depth: 1.0, top: 1.45, height: 1.5 }));
+
+/* ===== Forma: boxeador golpeando un saco ===== */
+const BOXER = Object.assign({
+  center: [0.28, 1.25, 0], radius: 2.0, fit: [2.95, 2.5], idle: 'sway', sway: [0.45, 0.4, 0.5], swing: 0.85,
+  frame(t) {
+    // ciclo de golpeo: dos puñetazos alternos y una pausa
+    const T = 1.9, p = (t % T) / T;
+    const punch = u => { u = Math.max(0, Math.min(1, u)); return u < 0.35 ? smooth01(u / 0.35) : smooth01(1 - (u - 0.35) / 0.65); };
+    const jab = punch(p / 0.42), cross = punch((p - 0.44) / 0.42);
+    const hit = Math.max(jab, cross), bob = 0.035 * Math.sin(p * TAU * 2);
+    // el saco retrocede con el impacto y vuelve oscilando
+    const kick = 0.34 * hit * hit, swingBag = kick + 0.09 * Math.sin(t * 3.4) * (1 - hit);
+    const bx = 0.86 + swingBag * 0.55, bz = -0.12;
+    const bag = (x, y, z) => {
+      const yy = Math.max(0, Math.min(1, (1.92 - y) / 1.5));                 // 0 arriba, 1 abajo
+      const cxx = bx + swingBag * yy * 0.75, w = 0.3 + 0.045 * Math.sin(yy * 3.1);
+      const r = Math.hypot(x - cxx, z - bz) - w, dy = Math.abs(y - 1.17) - 0.72;
+      const body = Math.min(Math.max(r, dy), 0) + Math.hypot(Math.max(r, 0), Math.max(dy, 0)) - 0.07;
+      const chain = capsule([bx + swingBag * 0.1, 1.9, bz], [bx, 2.45, bz], 0.03)(x, y, z);
+      return Math.min(body, chain);
+    };
+    const hx = -0.62, B = (dx, dy, dz, r) => [hx + dx, dy + bob, dz, r];
+    const head = ellipsoid(hx + 0.05, 1.63 + bob, 0.02, 0.17, 0.2, 0.17);
+    const torso = rcone([hx, 1.42 + bob, 0], [hx - 0.03, 0.92 + bob, 0], 0.26, 0.21);
+    const hips = ellipsoid(hx - 0.03, 0.86 + bob, 0, 0.24, 0.16, 0.2);
+    // piernas: una adelantada, el peso cambia con el golpe
+    const legF = rcone([hx + 0.12, 0.86, 0.16], [hx + 0.3 + 0.07 * hit, 0.06, 0.26], 0.13, 0.08);
+    const legB = rcone([hx - 0.14, 0.86, -0.14], [hx - 0.42, 0.06, -0.3], 0.13, 0.08);
+    // brazos: el que golpea se estira hacia el saco, el otro protege la cara
+    const arm = (ext, side) => {
+      const sh = [hx + 0.02, 1.36 + bob, side * 0.22];
+      const gx = hx + 0.22 + ext * 0.82, gy = 1.42 + bob - ext * 0.06, gz = side * (0.2 - ext * 0.14);
+      const ex = (sh[0] + gx) / 2 + 0.04, ey = (sh[1] + gy) / 2 - 0.16 + ext * 0.14, ez = (sh[2] + gz) / 2 + side * 0.08;
+      const up = capsule(sh, [ex, ey, ez], 0.095), fore = capsule([ex, ey, ez], [gx, gy, gz], 0.085);
+      const glove = ellipsoid(gx + 0.08, gy, gz, 0.15, 0.13, 0.13);
+      return (x, y, z) => Math.min(up(x, y, z), fore(x, y, z), glove(x, y, z));
+    };
+    const armL = arm(jab, 1), armR = arm(cross, -1);
+    const boxer = group(hx, 1.0, 0, 1.35, (x, y, z) => {
+      let d = smin(torso(x, y, z), hips(x, y, z), 0.1);
+      d = smin(d, head(x, y, z), 0.09);
+      d = smin(d, armL(x, y, z), 0.07); d = smin(d, armR(x, y, z), 0.07);
+      d = smin(d, legF(x, y, z), 0.08); d = smin(d, legB(x, y, z), 0.08);
+      return Math.max(d, -y);
+    });
+    return { sdf: (x, y, z) => Math.min(boxer(x, y, z), group(bx + swingBag * 0.4, 1.3, bz, 1.5, bag)(x, y, z)) };
+  }
+}, planar({ x0: -1.65, width: 3.1, z0: -0.6, depth: 1.2, top: 2.5, height: 2.6 }));
+
+/* ===== Forma: un T-rex caminando a dos patas (paso en bucle) ===== */
+const TREX = Object.assign({
+  center: [-0.12, 0.88, 0], radius: 1.9, fit: [2.72, 1.85], idle: 'sway', sway: [0.25, 0.25, 0.45], fullCell: true,
+  frame(t) {
+    const ph = t * 3.0, bob = 0.035 * Math.cos(2 * ph), pitchB = 0.05 * Math.sin(2 * ph);
+    const by = 0.9 + bob, cb = Math.cos(pitchB), sb = Math.sin(pitchB);
+    // postura más erguida: el tronco, la cabeza y la cola giran alrededor de la cadera; además, un leve cabeceo al andar
+    const UP = 0.2, HC = Math.cos(0.19), HS = Math.sin(0.19), ca = Math.cos(UP + pitchB), sa = Math.sin(UP + pitchB), px0 = 0.02, py0 = by - 0.12;
+    const rot = (x, y) => { const dx = x - px0, dy = y - py0; return [dx * ca + dy * sa + px0, -dx * sa + dy * ca + py0]; };
+    // cuerpo, cuello, cabeza y mandíbula
+    const body = ellipsoid(0, by, 0, 0.56, 0.31, 0.27), belly = ellipsoid(0.08, by - 0.12, 0, 0.36, 0.22, 0.24);
+    const neck = rcone([0.42, by + 0.12, 0], [0.7, by + 0.42, 0], 0.21, 0.15);
+    const jawOpen = 0.06 + 0.06 * Math.max(0, Math.sin(t * 1.1));
+    const skull = ellipsoid(0.92, by + 0.53, 0, 0.32, 0.15, 0.15), snout = ellipsoid(1.12, by + 0.5, 0, 0.16, 0.1, 0.12);
+    const jaw = ellipsoid(0.98, by + 0.36 - jawOpen, 0, 0.27, 0.065, 0.12);
+    // cola: cadena de conos, se mece al andar
+    const tw = 0.06 * Math.sin(ph);
+    const T0 = [-0.42, by + 0.05, 0], T1 = [-0.9, by - 0.04, tw * 0.5], T2 = [-1.28, by - 0.24, tw], T3 = [-1.5, by - 0.56, tw * 1.6];   // cola larga, doblada hacia abajo
+    const tail = [rcone(T0, T1, 0.25, 0.16), rcone(T1, T2, 0.16, 0.09), rcone(T2, T3, 0.09, 0.03)];
+    // bracitos
+    const arm = side => { const s0 = [0.45, by - 0.02, side * 0.2], e = [0.58, by - 0.16, side * 0.24], h = [0.7, by - 0.1, side * 0.22];
+      const a1 = capsule(s0, e, 0.045), a2 = capsule(e, h, 0.035); return (x, y, z) => Math.min(a1(x, y, z), a2(x, y, z)); };
+    const armL = arm(1), armR = arm(-1);
+    // patas: cinemática inversa (rodilla hacia delante, como las aves)
+    const L1 = 0.4, L2 = 0.4;
+    const leg = (side, off) => {
+      const p = ph + off, hip = [0.02, by - 0.12, side * 0.2];
+      const fx = 0.04 - 0.3 * Math.cos(p), fy = 0.1 + Math.max(0, 0.17 * Math.sin(p));
+      let dx = fx - hip[0], dy = fy - hip[1]; const d = Math.min(Math.hypot(dx, dy), L1 + L2 - 0.02);
+      const ux = dx / Math.hypot(dx, dy), uy = dy / Math.hypot(dx, dy);
+      const a = (L1 * L1 - L2 * L2 + d * d) / (2 * d), h = Math.sqrt(Math.max(0, L1 * L1 - a * a));
+      const kx = hip[0] + ux * a + uy * h, ky = hip[1] + uy * a - ux * h;   // la articulación se dobla hacia atrás, como en las aves
+      const ax = hip[0] + ux * d, ay = hip[1] + uy * d;
+      const thigh = rcone(hip, [kx, ky, side * 0.21], 0.27, 0.15), shin = rcone([kx, ky, side * 0.21], [ax, ay, side * 0.22], 0.14, 0.09);
+      const foot = ellipsoid(ax + 0.13, Math.max(0.055, ay - 0.02), side * 0.22, 0.23, 0.065, 0.12);
+      return (x, y, z) => Math.min(thigh(x, y, z), shin(x, y, z), foot(x, y, z));
+    };
+    const legL = leg(1, 0), legR = leg(-1, Math.PI);
+    const eyes = [[0.98, by + 0.6, 0.13, 0.045], [0.98, by + 0.6, -0.13, 0.045]];
+    return {
+      eyes,
+      sdf: (x0, y0, z) => {
+        const [x, y] = rot(x0, y0);
+        let d = smin(body(x, y, z), belly(x, y, z), 0.12);
+        d = smin(d, neck(x, y, z), 0.12);
+        // la cabeza se mantiene horizontal aunque el tronco esté erguido
+        const hx0 = x - 0.7, hy0 = y - (by + 0.42), hx = hx0 * HC - hy0 * HS + 0.7, hy = hx0 * HS + hy0 * HC + by + 0.42;
+        d = smin(d, smin(skull(hx, hy, z), snout(hx, hy, z), 0.08), 0.08);
+        d = Math.min(d, jaw(hx, hy, z));
+        d = smin(d, tail[0](x, y, z), 0.12); d = smin(d, tail[1](x, y, z), 0.06); d = smin(d, tail[2](x, y, z), 0.04);
+        d = smin(d, armL(x, y, z), 0.04); d = smin(d, armR(x, y, z), 0.04);
+        d = smin(d, legL(x0, y0, z), 0.1); d = smin(d, legR(x0, y0, z), 0.1);
+        return Math.max(d, -y0);
+      }
+    };
+  }
+}, planar({ x0: -1.55, width: 2.95, z0: -0.4, depth: 0.8, top: 1.85, height: 1.95 }));
+
+/* ===== Forma: un arbolito y dos pájaros volando ===== */
+const FIELD = Object.assign({
+  center: [0.05, 0.92, 0], radius: 1.9, fit: [2.9, 2.05], idle: 'sway', sway: [0.2, 0.3, 0.4],
+  frame(t) {
+    const sw = 0.035 * Math.sin(t * 1.3), k = 1.0;
+    const trunk = rcone([0, 0.0, 0], [0.02 + sw * 0.4, 0.8, 0], 0.13, 0.08);
+    const br1 = rcone([0.02, 0.55, 0], [-0.32 + sw, 0.95, 0.05], 0.07, 0.035), br2 = rcone([0.02, 0.62, 0], [0.34 + sw, 0.98, -0.05], 0.065, 0.03);
+    const blobs = [[0 + sw, 1.32, 0, 0.46, 0.4, 0.4], [-0.42 + sw, 1.08, 0.05, 0.33, 0.3, 0.32], [0.43 + sw, 1.1, -0.04, 0.33, 0.3, 0.32],
+                   [-0.22 + sw, 1.58, -0.05, 0.3, 0.26, 0.3], [0.26 + sw, 1.56, 0.06, 0.3, 0.26, 0.3], [0 + sw, 0.98, 0.18, 0.3, 0.24, 0.28]].map(b => ellipsoid(...b));
+    const canopy = group(0, 1.3, 0, 0.95, (x, y, z) => { let d = 1e9; for (const f of blobs) d = smin(d, f(x, y, z), 0.12); return d; });
+    const wood = (x, y, z) => smin(trunk(x, y, z), Math.min(br1(x, y, z), br2(x, y, z)), 0.05);
+    // dos pájaros: cinco letras cada uno, en forma de "v" que aletea; cruzan de izquierda a derecha
+    const P = [], frac = v => v - Math.floor(v);
+    [[0, 2.0, -0.3, 0.07], [0.5, 1.75, 0.35, 0.062]].forEach(([ph, h, z, sp], bI) => {
+      const x = -1.55 + frac(t * sp + ph) * 3.2, y = h + 0.08 * Math.sin(t * 1.4 + bI * 2);
+      const fl = Math.sin(t * 8 + bI * 1.7);
+      [[0, 0], [-0.09, 0.05 * fl + 0.02], [0.09, 0.05 * fl + 0.02], [-0.18, 0.1 * fl + 0.06], [0.18, 0.1 * fl + 0.06]]
+        .forEach(([dx, dy], kk) => P.push([x + dx, y + dy, z, 5, bI * 7 + kk * 3]));
+    });
+    return {
+      particles: P,
+      sdf: (x, y, z) => Math.max(Math.min(wood(x, y, z), canopy(x, y, z)), -y),
+      tone: (x, y, z) => (y > 0.85 ? 1 : 0)
+    };
+  }
+}, planar({ x0: -1.0, width: 2.0, z0: -0.6, depth: 1.2, top: 2.0, height: 2.1 }));
+
+/* ===== Forma: una casita con el tejado rojo ===== */
+const ROOM = Object.assign({
+  center: [0, 0.62, 0], radius: 1.6, basePitch: 0.22, fit: [2.5, 1.95], idle: 'sway', sway: [0.55, 0.3, 0.4],
+  frame() {
+    if (this._f) return this._f;
+    const WT = 0.72, hx = 0.75, hz = 0.55;                      // muros: alto, medio ancho, media profundidad
+    const walls = rbox(0, WT / 2, 0, hx, WT / 2, hz, 0.02);
+    const door = rbox(0.18, 0.24, hz, 0.13, 0.24, 0.06, 0.01);
+    const win1 = rbox(-0.38, 0.42, hz, 0.14, 0.11, 0.05, 0.01), win2 = rbox(-hx, 0.42, 0.0, 0.05, 0.11, 0.16, 0.01), win3 = rbox(hx, 0.42, 0.0, 0.05, 0.11, 0.16, 0.01);
+    const th = 0.62, c = Math.cos(th), sn = Math.sin(th), yA = WT + 0.55;  // tejado a dos aguas, con alero
+    const roof = (x, y, z) => Math.max(Math.max((y - yA) * c + z * sn, (y - yA) * c - z * sn), Math.max(WT - 0.04 - y, Math.abs(x) - (hx + 0.1)));
+    const chimney = rbox(0.42, WT + 0.5, -0.18, 0.08, 0.2, 0.08, 0.01);
+    const house = (x, y, z) => {
+      let d = walls(x, y, z);
+      d = Math.max(d, -door(x, y, z)); d = Math.max(d, -win1(x, y, z)); d = Math.max(d, -win2(x, y, z)); d = Math.max(d, -win3(x, y, z));
+      return Math.min(d, roof(x, y, z), chimney(x, y, z));
+    };
+    this._f = {
+      sdf: (x, y, z) => Math.max(house(x, y, z), -y),
+      tint: (x, y, z) => y > WT - 0.05 && roof(x, y, z) < 0.03 && chimney(x, y, z) > 0.02,   // el tejado: letras rojas
+      tone: (x, y, z) => (roof(x, y, z) < 0.03 ? 1 : 0)
+    };
+    return this._f;
+  }
+}, planar({ x0: -0.9, width: 1.8, z0: -0.7, depth: 1.4, top: 1.35, height: 1.4 }));
+
+/* ===== Forma: la luna llena con sus cráteres (los cráteres quedan sin letras, con un borde gris muy oscuro) ===== */
+const MOON = {
+  center: [0, 0, 0], radius: 1.1, fit: [2.25, 2.25], idle: 'sway', sway: [0, 0.3, 0.3], light: [-0.15, 0.2, 1],
+  blocks(S, cw, lh) { return [{ cols: Math.max(24, Math.round(TAU * 1.0 * S / cw)), rows: Math.ceil(2.1 * S / lh) + 2 }]; },
+  glyph(px, py, pz, nx, ny, nz, g) {
+    const b = g.blocks[0];
+    let u = (Math.atan2(px, pz) + 1.0) / TAU; u -= Math.floor(u);
+    const row = Math.max(0, Math.floor((1.02 - py) / g.rowH));
+    return b.lines[row % b.lines.length][Math.min(b.T - 1, Math.floor(u * b.T))];
+  },
+  // cráteres y mares: [dirección (lat, lon en grados), radio angular, ¿mar?]
+  spots: [[25, -20, 20, 1], [12, 18, 16, 1], [-8, -30, 14, 1], [-28, 10, 9, 0], [38, 22, 7, 0], [-42, -18, 8, 0], [5, 40, 6, 0],
+          [48, -8, 5, 0], [-20, 35, 6, 0], [20, -48, 6, 0], [-55, 30, 6, 0], [60, 35, 5, 0], [-5, 0, 4, 0], [30, 55, 5, 0], [-35, -50, 6, 0]],
+  frame() {
+    if (this._f) return this._f;
+    const sp = this.spots.map(([la, lo, r, mare]) => {
+      const a = la * Math.PI / 180, o = lo * Math.PI / 180;
+      return [Math.cos(a) * Math.sin(o), Math.sin(a), Math.cos(a) * Math.cos(o), Math.cos(r * Math.PI / 180), Math.cos(r * 0.72 * Math.PI / 180), mare];
+    });
+    const where = (x, y, z) => {                                  // 0 = suelo claro, 1 = borde/mar (gris oscuro), 2 = dentro del cráter (vacío)
+      const n = Math.hypot(x, y, z) || 1, ux = x / n, uy = y / n, uz = z / n;
+      let k = 0;
+      for (const s of sp) {
+        const c = ux * s[0] + uy * s[1] + uz * s[2];
+        if (c > s[4]) { k = s[5] ? Math.max(k, 1) : 2; if (k === 2) break; }
+        else if (c > s[3]) k = Math.max(k, 1);
+      }
+      return k;
+    };
+    this._f = {
+      sdf: (x, y, z) => Math.hypot(x, y, z) - 1,
+      hole: (x, y, z) => where(x, y, z) === 2,
+      tone: (x, y, z) => (where(x, y, z) === 1 ? -5 : 0)
+    };
+    return this._f;
+  }
+};
+
+/* ===== Forma: el mapa de Europa (contorno en lon/lat, en relieve plano) ===== */
+const EUROPE_POLYS = [
+  // continente (sentido horario desde Gibraltar), cortado al este por el meridiano 42
+  [[-5.6,36.0],[-6.3,36.8],[-7.4,37.2],[-8.9,37.0],[-8.8,38.7],[-9.5,39.4],[-8.7,41.2],[-8.9,42.5],[-9.3,43.0],[-8.0,43.7],[-5.8,43.6],[-3.8,43.4],[-1.8,43.4],
+   [-1.2,44.6],[-1.2,46.2],[-2.5,47.3],[-4.6,47.9],[-4.7,48.5],[-3.0,48.8],[-1.6,48.7],[-1.9,49.7],[0.1,49.5],[1.6,50.9],[3.2,51.3],[4.5,52.0],[4.8,53.0],
+   [7.0,53.5],[8.6,53.9],[8.6,55.5],[8.2,56.8],[10.6,57.7],[10.3,56.5],[10.9,56.0],[10.0,55.0],[11.0,54.4],[13.0,54.5],[14.3,53.9],[16.0,54.4],[18.6,54.7],
+   [21.2,55.3],[21.0,56.5],[24.1,57.0],[23.4,58.6],[24.7,59.5],[28.0,59.5],[30.2,59.9],[28.8,60.5],[25.0,60.3],[22.9,59.9],[21.4,60.8],[21.5,63.0],[25.4,65.0],
+   [24.2,65.8],[22.0,65.5],[20.5,63.8],[17.5,62.4],[17.2,61.0],[18.9,59.9],[16.8,58.6],[16.5,57.2],[15.9,56.1],[14.2,55.4],[12.8,55.6],[12.6,56.2],[11.8,57.7],
+   [11.2,59.0],[10.5,59.4],[9.0,58.6],[7.0,58.0],[5.6,58.9],[5.0,60.5],[5.2,62.0],[7.5,63.0],[10.0,64.3],[12.5,66.0],[14.5,67.5],[16.5,68.5],[19.0,69.8],
+   [23.5,70.6],[25.8,71.1],[28.5,70.9],[31.0,70.3],[33.0,69.4],[36.0,69.1],[41.0,67.5],[42.0,66.5],[42.0,47.0],[39.5,47.2],[37.5,46.9],[35.0,45.4],[33.5,44.4],
+   [32.5,45.4],[31.0,46.6],[30.0,45.4],[28.6,44.2],[28.0,43.2],[28.0,42.0],[29.0,41.2],[27.0,40.4],[26.2,40.1],[26.0,40.8],[24.0,40.7],[22.9,40.6],[23.9,39.9],
+   [22.6,39.2],[23.0,38.0],[23.9,37.7],[23.1,36.5],[22.4,36.4],[21.7,36.8],[21.1,37.8],[21.6,38.3],[20.7,39.0],[20.0,39.7],[19.4,40.3],[19.4,41.8],[18.5,42.5],
+   [16.4,43.5],[15.2,44.3],[13.6,45.1],[13.7,45.7],[12.3,45.4],[12.4,44.2],[13.6,43.6],[14.5,42.2],[16.0,41.5],[18.0,40.6],[18.5,40.1],[17.0,40.4],[16.6,39.0],
+   [16.1,38.0],[15.6,38.0],[15.7,39.5],[15.3,40.0],[14.3,40.8],[12.5,41.7],[11.1,42.4],[10.5,43.6],[8.9,44.4],[7.5,43.8],[6.0,43.1],[4.8,43.4],[3.0,43.2],
+   [3.2,42.0],[2.2,41.4],[0.9,40.8],[-0.3,39.4],[0.2,38.7],[-0.8,37.6],[-2.1,36.7],[-4.4,36.7]],
+  // Gran Bretaña, Irlanda, Islandia, Sicilia, Cerdeña, Córcega, Creta, Selandia
+  [[-5.7,50.1],[-3.0,50.6],[0.3,50.8],[1.4,51.4],[1.7,52.6],[0.3,53.5],[-0.2,54.1],[-1.5,55.0],[-2.0,55.9],[-1.8,57.5],[-3.0,58.6],[-5.0,58.6],[-5.7,57.5],
+   [-6.0,56.6],[-5.5,55.4],[-5.0,54.8],[-3.4,54.9],[-3.2,54.0],[-3.0,53.4],[-4.6,53.3],[-4.1,52.8],[-5.2,51.8],[-3.2,51.4],[-4.2,51.2]],
+  [[-6.0,52.2],[-6.0,53.5],[-5.6,54.6],[-7.3,55.3],[-8.5,54.9],[-10.0,54.2],[-9.9,53.4],[-9.6,52.6],[-10.4,52.0],[-9.5,51.6],[-8.5,51.6],[-7.0,52.1]],
+  [[-24.0,65.5],[-22.0,66.4],[-18.0,66.2],[-15.0,66.4],[-13.5,65.2],[-14.5,64.4],[-18.0,63.4],[-21.0,63.8],[-22.7,63.9]],
+  [[12.4,38.0],[15.6,38.3],[15.1,36.7],[12.5,37.6]],
+  [[8.2,41.1],[9.8,41.0],[9.6,39.1],[8.4,39.0]],
+  [[8.6,42.9],[9.4,43.0],[9.4,41.4],[8.7,41.6]],
+  [[23.6,35.6],[26.3,35.3],[26.1,35.0],[23.5,35.3]],
+  [[11.0,55.8],[12.6,56.0],[12.4,55.2],[11.2,55.2]]
+];
+const EUROPE = Object.assign({
+  center: [0.1, 0.0, 0], radius: 1.6, fit: [2.6, 2.05], idle: 'sway', sway: [0.0, 0.16, 0.35], swing: 0.45,
+  frame() {
+    if (this._f) return this._f;
+    // proyección sencilla: x = lon·cos(52°), y = lat, escalado a ~3 unidades de ancho; campo de distancias 2D precalculado
+    const K = 0.052, LON0 = 9, LAT0 = 53, cosL = Math.cos(52 * Math.PI / 180);
+    const polys = EUROPE_POLYS.map(p => p.map(([lo, la]) => [(lo - LON0) * cosL * K * 1.0, (la - LAT0) * K]));
+    const segDist = (px, py) => {
+      let best = 1e9, inside = false;
+      for (const P of polys) for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+        const [ax, ay] = P[j], [bx, by] = P[i], ex = bx - ax, ey = by - ay, wx = px - ax, wy = py - ay;
+        const h = Math.max(0, Math.min(1, (wx * ex + wy * ey) / (ex * ex + ey * ey)));
+        best = Math.min(best, Math.hypot(wx - ex * h, wy - ey * h));
+        if ((ay > py) !== (by > py) && px < ax + (py - ay) * ex / ey) inside = !inside;
+      }
+      return inside ? -best : best;
+    };
+    const X0 = -1.55, X1 = 1.5, Y0 = -0.98, Y1 = 1.0, N = 230, M = Math.round(N * (Y1 - Y0) / (X1 - X0));
+    const grid = new Float32Array(N * M);
+    for (let j = 0; j < M; j++) for (let i = 0; i < N; i++) grid[j * N + i] = segDist(X0 + (X1 - X0) * i / (N - 1), Y0 + (Y1 - Y0) * j / (M - 1));
+    const d2 = (x, y) => {
+      const fx = (x - X0) / (X1 - X0) * (N - 1), fy = (y - Y0) / (Y1 - Y0) * (M - 1);
+      if (fx < 0 || fy < 0 || fx > N - 1 || fy > M - 1) return Math.hypot(Math.max(X0 - x, 0, x - X1), Math.max(Y0 - y, 0, y - Y1)) + 0.05;
+      const i = Math.min(N - 2, Math.floor(fx)), j = Math.min(M - 2, Math.floor(fy)), u = fx - i, v = fy - j;
+      const g = (a, b) => grid[b * N + a];
+      return (g(i, j) * (1 - u) + g(i + 1, j) * u) * (1 - v) + (g(i, j + 1) * (1 - u) + g(i + 1, j + 1) * u) * v;
+    };
+    this._f = { sdf: (x, y, z) => { const a = d2(x, y), bz = Math.abs(z) - 0.07; return Math.min(Math.max(a, bz), 0) + Math.hypot(Math.max(a, 0), Math.max(bz, 0)); } };
+    return this._f;
+  }
+}, planar({ x0: -1.6, width: 3.2, z0: -0.1, depth: 0.2, top: 1.05, height: 2.1 }));
+
+/* ===== Forma: un cuadro de mesa. Marco ancho con relieve (moldura), fondo negro sin letras
+   y, por detrás, la trasera y la pata de apoyo, que se ven al girar ===== */
+const PAINTING = Object.assign({
+  center: [0, 0.98, -0.12], radius: 1.75, fit: [2.6, 2.45], idle: 'sway', sway: [0.3, 0.3, 0.35],
+  frame() {
+    if (this._f) return this._f;
+    const W = 0.82, H = 1.0, F = 0.27;                       // medio ancho, medio alto y anchura del marco
+    const LEAN = 0.2, cl = Math.cos(LEAN), sl = Math.sin(LEAN), Y0 = 0.07 + H * cl;   // el cuadro, apoyado y algo inclinado hacia atrás
+    const toLocal = (x, y, z) => { const dy = y - Y0, dz = z; return [x, dy * cl - dz * sl, dy * sl + dz * cl]; };
+    // marco: bloque redondeado menos el hueco, con una moldura en relieve a media anchura y un escalón hacia el lienzo
+    const outer = rbox(0, 0, 0, W, H, 0.07, 0.05), hole = rbox(0, 0, 0, W - F, H - F, 0.2, 0.01);
+    const ridgeO = rbox(0, 0, 0.035, W - F * 0.3, H - F * 0.3, 0.07, 0.04), ridgeI = rbox(0, 0, 0.035, W - F * 0.62, H - F * 0.62, 0.2, 0.01);
+    const lip = rbox(0, 0, -0.02, W - F + 0.05, H - F + 0.05, 0.045, 0.01);
+    const frameS = (x, y, z) => {
+      const body = Math.max(outer(x, y, z), -hole(x, y, z));
+      const ridge = Math.max(ridgeO(x, y, z), -ridgeI(x, y, z));
+      return Math.min(smin(body, ridge, 0.03), Math.max(lip(x, y, z), -hole(x, y, z) - 0.05));
+    };
+    const board = rbox(0, 0, -0.04, W - F + 0.06, H - F + 0.06, 0.025, 0.005);      // el lienzo / la trasera
+    const back = rbox(0, 0, -0.085, W - 0.06, H - 0.06, 0.018, 0.01);               // tapa trasera
+    // pata de apoyo: sale de la trasera, a media altura, y baja hasta la mesa por detrás
+    const footW = [0, 0.07, -0.95], hingeW = (() => { const ly = 0.05, lz = -0.1; return [0, Y0 + ly * cl + lz * sl, -ly * sl + lz * cl]; })();
+    const leg = capsule(hingeW, footW, 0.055);
+    const legS = (x, y, z) => { const d = leg(x, y, z); return Math.max(d, Math.abs(x) - 0.14); };
+    const pic = (x, y, z) => { const [lx, ly, lz] = toLocal(x, y, z); return Math.min(frameS(lx, ly, lz), board(lx, ly, lz), back(lx, ly, lz)); };
+    this._f = {
+      sdf: (x, y, z) => Math.max(Math.min(pic(x, y, z), legS(x, y, z)), -y),
+      // el lienzo, por delante, es negro (sin letras); por detrás se ve la trasera
+      hole: (x, y, z) => { const [lx, ly, lz] = toLocal(x, y, z); return lz > -0.03 && Math.abs(lx) < W - F + 0.005 && Math.abs(ly) < H - F + 0.005 && legS(x, y, z) > 0.02; },
+      tone: (x, y, z) => { const [lx, ly, lz] = toLocal(x, y, z); return legS(x, y, z) < 0.02 ? 0 : (lz < -0.06 ? -1 : 2); }
+    };
+    return this._f;
+  }
+}, planar({ x0: -0.9, width: 1.8, z0: -1.0, depth: 1.2, top: 2.1, height: 2.2 }));
+
+/* ===== Forma: un panettone con pepitas de chocolate (puntos negros) ===== */
+const PANETTONE = {
+  center: [0, 0.78, 0], radius: 1.4, basePitch: 0.25, fit: [2.1, 1.95], idle: 'sway', sway: [0.0, 0.3, 0.35],
+  blocks(S, cw, lh) { return [{ cols: Math.max(24, Math.round(TAU * 0.75 * S / cw)), rows: Math.ceil(1.8 * S / lh) + 2 }]; },
+  glyph(px, py, pz, nx, ny, nz, g) {
+    const b = g.blocks[0];
+    let u = (Math.atan2(px, pz) + 1.0) / TAU; u -= Math.floor(u);
+    const row = Math.max(0, Math.floor((1.6 - py) / g.rowH));
+    return b.lines[row % b.lines.length][Math.min(b.T - 1, Math.floor(u * b.T))];
+  },
+  frame() {
+    if (this._f) return this._f;
+    const R = 0.72, Hc = 0.82;
+    const body = (x, y, z) => { const q = Math.hypot(x, z) - R, h = Math.abs(y - Hc / 2) - Hc / 2; return Math.min(Math.max(q, h), 0) + Math.hypot(Math.max(q, 0), Math.max(h, 0)) - 0.02; };
+    const dome = ellipsoid(0, Hc - 0.02, 0, R + 0.06, 0.62, R + 0.06);       // la cúpula, un poco más ancha que el molde
+    const band = (x, y, z) => { const q = Math.abs(Math.hypot(x, z) - (R + 0.015)) - 0.02, h = Math.abs(y - 0.33) - 0.33; return Math.max(q, h); };  // papel
+    // pepitas: puntos repartidos por la cúpula y el costado
+    const chips = [];
+    for (let i = 0; i < 70; i++) {
+      const r1 = Math.sin(i * 12.9898) * 43758.5453, r2 = Math.sin(i * 78.233) * 12345.678;
+      const a = (r1 - Math.floor(r1)) * TAU, v = r2 - Math.floor(r2);
+      if (v < 0.55) { const el = v / 0.55 * 1.3; chips.push([Math.cos(a) * Math.cos(el), Math.sin(el), Math.sin(a) * Math.cos(el), 'd']); }
+      else { chips.push([Math.cos(a), 0.7 + (v - 0.55) * 0.25, Math.sin(a), 's']); }
+    }
+    const isChip = (x, y, z) => {
+      for (const c of chips) {
+        if (c[3] === 'd') { const dx = x / (R + 0.06) - c[0], dy = (y - Hc + 0.02) / 0.62 - c[1], dz = z / (R + 0.06) - c[2]; if (dx * dx + dy * dy + dz * dz < 0.012) return true; }
+        else { const dx = x / R - c[0], dy = y - c[1], dz = z / R - c[2]; if (dx * dx + dy * dy * 4 + dz * dz < 0.008) return true; }
+      }
+      return false;
+    };
+    this._f = {
+      sdf: (x, y, z) => Math.max(Math.min(smin(body(x, y, z), Math.max(dome(x, y, z), Hc - 0.12 - y), 0.05), band(x, y, z)), -y),
+      hole: (x, y, z) => y > 0.68 && isChip(x, y, z),
+      tone: (x, y, z) => (y < 0.67 ? -1 : 1)                          // papel más tenue, el bizcocho más claro
+    };
+    return this._f;
+  }
+};
+
+/* ===== Forma: dos perros pegados, uno montado sobre el otro, con un vaivén continuo (silueta, sin detalle) ===== */
+const DOGS = Object.assign({
+  center: [0.12, 0.62, 0], radius: 1.6, fit: [2.4, 1.75], idle: 'sway', sway: [0.25, 0.25, 0.4], swing: 0.55,
+  frame(t) {
+    const wag = 0.12 * Math.sin(t * 7);
+    const thr = 0.055 * Math.sin(t * 9);                          // el vaivén de la pelvis, de alante atrás
+    // perro de delante (de pie, mirando a la derecha); se mece un poco con el empuje
+    const A = 0.42 + thr * 0.25;
+    const bodyA = ellipsoid(A, 0.66, 0, 0.5, 0.2, 0.19), chestA = ellipsoid(A + 0.38, 0.7, 0, 0.2, 0.22, 0.2);
+    const neckA = rcone([A + 0.48, 0.78, 0], [A + 0.66, 1.02, 0], 0.13, 0.1), headA = ellipsoid(A + 0.74, 1.06, 0, 0.17, 0.13, 0.13), snoutA = ellipsoid(A + 0.92, 1.0, 0, 0.11, 0.065, 0.075);
+    const earA = rcone([A + 0.7, 1.15, 0.06], [A + 0.66, 1.3, 0.08], 0.05, 0.02);
+    const legsA = [[0.42 + 0.35, 0.13], [0.42 + 0.35, -0.13], [0.42 - 0.32, 0.13], [0.42 - 0.32, -0.13]].map(([x, z]) => rcone([x + thr * 0.25, 0.6, z], [x + 0.02, 0.02, z], 0.08, 0.05));
+    const tailA = rcone([A - 0.48, 0.72, 0], [A - 0.5, 0.86, 0.12], 0.05, 0.03);   // la cola, apartada
+    // perro de detrás: pegado al otro, erguido sobre las traseras, con las delanteras abrazando el lomo
+    const B = -0.12 + thr, tilt = 0.5, cb = Math.cos(tilt), sb = Math.sin(tilt);
+    const rotB = (x, y) => { const dx = x - B, dy = y - 0.62; return [dx * cb + dy * sb + B, -dx * sb + dy * cb + 0.62]; };
+    const bodyB = ellipsoid(B + 0.02, 0.62, 0, 0.44, 0.19, 0.18), chestB = ellipsoid(B + 0.34, 0.66, 0, 0.19, 0.2, 0.19);
+    const neckB = rcone([B + 0.43, 0.72, 0], [B + 0.58, 0.92, 0], 0.12, 0.095), headB = ellipsoid(B + 0.66, 0.96, 0, 0.16, 0.12, 0.12), snoutB = ellipsoid(B + 0.82, 0.9, 0, 0.1, 0.06, 0.07);
+    const earB = rcone([B + 0.62, 1.04, 0.06], [B + 0.56, 1.18, 0.08], 0.05, 0.02);
+    const frontB = [0.17, -0.17].map(z => rcone([B + 0.34, 0.52, z], [B + 0.52, 0.28, z * 1.3], 0.065, 0.045));   // rodeando el lomo del otro
+    const hipX = B - 0.28;
+    const hindB = [0.13, -0.13].map(z => rcone([hipX, 0.5, z], [-0.5, 0.02, z], 0.085, 0.05));   // los pies, fijos en el suelo
+    const tailB = rcone([B - 0.38, 0.66, 0], [B - 0.58, 0.64, wag * 0.3], 0.05, 0.03);
+    const dogA = (x, y, z) => {
+      let d = smin(bodyA(x, y, z), chestA(x, y, z), 0.1); d = smin(d, neckA(x, y, z), 0.06); d = smin(d, headA(x, y, z), 0.05);
+      d = smin(d, snoutA(x, y, z), 0.04); d = Math.min(d, earA(x, y, z), tailA(x, y, z));
+      for (const l of legsA) d = smin(d, l(x, y, z), 0.05);
+      return d;
+    };
+    const dogB = (x0, y0, z) => {
+      const [x, y] = rotB(x0, y0);
+      let d = smin(bodyB(x, y, z), chestB(x, y, z), 0.1); d = smin(d, neckB(x, y, z), 0.06); d = smin(d, headB(x, y, z), 0.05);
+      d = smin(d, snoutB(x, y, z), 0.04); d = Math.min(d, earB(x, y, z), tailB(x, y, z));
+      for (const l of frontB) d = smin(d, l(x, y, z), 0.05);
+      for (const l of hindB) d = smin(d, l(x0, y0, z), 0.05);
+      return d;
+    };
+    return { sdf: (x, y, z) => Math.max(Math.min(dogA(x, y, z), dogB(x, y, z)), -y), tone: (x, y, z) => (dogA(x, y, z) < 0.02 ? 1 : 0) };
+  }
+}, planar({ x0: -1.0, width: 2.4, z0: -0.4, depth: 0.8, top: 1.7, height: 1.8 }));
+
+
+/* ===== Forma: eclipse de Sol. La Luna (un disco negro, sin letras) se acerca, cubre el Sol del todo
+   y aparece la corona; después se aleja y el Sol vuelve a quedar entero. En bucle. ===== */
+const ECLIPSE = {
+  center: [0, 0, 0], radius: 1.7, fit: [2.9, 2.75], idle: 'sway', sway: [0, 0, 0.3], swing: 0.001, light: [-0.1, 0.15, 1],
+  blocks(S, cw, lh) { return [{ cols: Math.max(24, Math.round(TAU * 1.0 * S / cw)), rows: Math.ceil(2.1 * S / lh) + 2 }]; },
+  glyph(px, py, pz, nx, ny, nz, g) {
+    const b = g.blocks[0];
+    let u = (Math.atan2(px, pz) + 1.0) / TAU; u -= Math.floor(u);
+    const row = Math.max(0, Math.floor((1.02 - py) / g.rowH));
+    return b.lines[row % b.lines.length][Math.min(b.T - 1, Math.floor(u * b.T))];
+  },
+  frame(t) {
+    const PER = 9, p = (t % PER) / PER, RM = 1.04;               // ciclo de 9 s; la Luna es un poco mayor que el Sol
+    const ease = u => u * u * (3 - 2 * u);
+    // la Luna llega desde abajo a la izquierda, se detiene en la totalidad y sigue hacia arriba a la derecha
+    let s;
+    if (p < 0.42) s = -1 + ease(p / 0.42);                       // acercándose
+    else if (p < 0.58) s = 0;                                    // totalidad
+    else s = ease((p - 0.58) / 0.42);                            // alejándose
+    const D = 2.35, mx = s * D * 0.94, my = s * D * 0.34;
+    const dist = Math.hypot(mx, my), tot = Math.max(0, 1 - dist / 0.16);   // 1 = totalidad
+    const P = [], frac = v => v - Math.floor(v), rnd = i => frac(Math.sin(i * 127.1 + 311.7) * 43758.5453);
+    // corona: filamentos de letras alrededor del disco, que parpadean (solo cerca de la totalidad)
+    if (tot > 0) for (let i = 0; i < 90; i++) {
+      if (rnd(i + 900) > tot) continue;
+      const a = rnd(i) * TAU, len = 0.12 + rnd(i + 50) * 0.55 * (0.6 + 0.4 * Math.abs(Math.cos(a)));   // más larga hacia los lados
+      const r = 1.08 + rnd(i + 100) * len, fl = 0.5 + 0.5 * Math.sin(t * (1.5 + rnd(i + 150) * 2.5) + i);
+      P.push([Math.cos(a) * r, Math.sin(a) * r, 0, Math.max(1, Math.round((1 - (r - 1.08) / 0.7) * 5 * fl)), i * 7 + 1]);
+    }
+    // anillo de diamante: un destello en el borde justo antes y justo después de la totalidad
+    if (dist > 0.04 && dist < 0.26) {
+      const a = Math.atan2(-my, -mx), k = 1 - Math.abs(dist - 0.13) / 0.13;
+      for (let i = 0; i < 6; i++) P.push([Math.cos(a + (i - 2.5) * 0.06) * 1.03, Math.sin(a + (i - 2.5) * 0.06) * 1.03, 0.2, Math.max(1, Math.round(5 * k)), 400 + i]);
+    }
+    return {
+      particles: P,
+      sdf: (x, y, z) => Math.hypot(x, y, z) - 1,
+      hole: (x, y, z) => z > 0 && Math.hypot(x - mx, y - my) < RM,          // la Luna tapa el Sol: sin letras
+      tone: (x, y, z) => 1
+    };
+  }
+};
+
+/* ===== Forma: rayos. Cada 2,6 s cae un rayo de arriba abajo, parpadea varias veces y se apaga;
+   en cada descarga cambia de camino. ===== */
+const STORM = Object.assign({
+  center: [0, 1.15, 0], radius: 2.0, fit: [2.9, 2.45], idle: 'sway', sway: [0.2, 0.25, 0.35], swing: 0.5,
+  frame(t) {
+    const PER = 2.6, n = Math.floor(t / PER), tau = t - n * PER;
+    const frac = v => v - Math.floor(v), rnd = i => frac(Math.sin((i + n * 37.1) * 127.1 + 311.7) * 43758.5453);
+    const grow = Math.min(1, tau / 0.12);                                        // baja en un instante
+    const on = tau < 0.12 || (tau > 0.16 && tau < 0.24) || (tau > 0.32 && tau < 0.38) || (tau > 0.5 && tau < 0.62);   // parpadeo
+    const flash = on && tau < 0.7;
+    const K = 1.65, TOP = 2.3, LEN = 2.25;                                       // más grande: ocupa toda la altura
+    let bolt = () => 9;
+    if (tau < 0.7) {
+      const pts = [[(rnd(1) - 0.5) * 0.5 * K, TOP, 0]], N = 7;
+      for (let i = 1; i <= N; i++) pts.push([pts[i - 1][0] + (rnd(i + 10) - 0.5) * 0.55 * K, TOP - LEN * i / N, (rnd(i + 20) - 0.5) * 0.1]);
+      const yEnd = TOP - LEN * grow;
+      const segs = [];
+      for (let i = 0; i < N; i++) {
+        const a = pts[i], b = pts[i + 1]; if (a[1] < yEnd) break;
+        const k = b[1] < yEnd ? (a[1] - yEnd) / (a[1] - b[1]) : 1;
+        segs.push(capsule(a, [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k], (0.055 - 0.003 * i) * K));
+      }
+      // una rama que se separa a media altura
+      const j = 2 + Math.floor(rnd(30) * 2), bp = pts[j], side = rnd(31) < 0.5 ? -1 : 1;
+      const br1 = [bp[0] + side * 0.32 * K, bp[1] - 0.22 * K, 0], br2 = [br1[0] + side * 0.18 * K, br1[1] - 0.24 * K, 0];
+      if (bp[1] > yEnd) { segs.push(capsule(bp, br1, 0.035 * K)); if (br1[1] > yEnd) segs.push(capsule(br1, br2, 0.028 * K)); }
+      if (flash) bolt = (x, y, z) => { let d = 9; for (const s of segs) d = Math.min(d, s(x, y, z)); return d; };
+    }
+    return {
+      sdf: (x, y, z) => bolt(x, y, z),
+      tone: () => 5                                                              // el rayo, siempre al máximo brillo
+    };
+  }
+}, planar({ x0: -1.4, width: 2.8, z0: -0.5, depth: 1.0, top: 2.3, height: 2.3 }));
+
+
+/* ===== Ayuda: texto enrollado alrededor de un eje vertical (para objetos con volumen) ===== */
+function wrapped(def) {   // def: {cx, cz, r, top, height}
+  return {
+    blocks(S, cw, lh) { return [{ cols: Math.max(24, Math.round(TAU * def.r * S / cw)), rows: Math.ceil(def.height * S / lh) + 2 }]; },
+    glyph(px, py, pz, nx, ny, nz, g) {
+      const b = g.blocks[0];
+      let u = (Math.atan2(px - def.cx, pz - def.cz) + 1.0) / TAU; u -= Math.floor(u);
+      const row = Math.max(0, Math.floor((def.top - py) / g.rowH));
+      return b.lines[row % b.lines.length][Math.min(b.T - 1, Math.floor(u * b.T))];
+    }
+  };
+}
+
+/* ===== Forma: alguien de espaldas hablando a su reflejo en un espejo de pared (Monodiálogo) ===== */
+const MIRROR = Object.assign({
+  center: [0.05, 1.22, -0.4], radius: 1.7, fit: [2.1, 2.05], idle: 'sway', sway: [0.0, 0.14, 0.4], swing: 0.3,
+  frame(t) {
+    const MX = 0.22, MY = 1.4, MZ = -0.45, GW = 0.6, GH = 0.68, F = 0.11;            // espejo: centro, medio cristal, marco
+    const PX = -0.5, PY = -0.12, PZ = 0.45, K = 0.95;                               // persona (abajo a la izquierda, de espaldas); reflejo
+    const RX = 0.38, RY = 1.42, HY = 1.4;                                           // cabeza del reflejo; altura de la cabeza (coordenadas propias)
+    const talk = Math.max(0, Math.sin(t * 0.9)), nod = 0.02 * Math.sin(t * 7.5) * talk;
+    const frameO = rbox(MX, MY, MZ, GW + F, GH + F, 0.05, 0.025), glass = rbox(MX, MY, MZ, GW, GH, 0.3, 0.004);
+    const mirror = (x, y, z) => Math.max(frameO(x, y, z), -glass(x, y, z));
+    // la persona en coordenadas propias (cabeza en (0, HY, 0)), mirando hacia −z
+    const head = ellipsoid(0, HY + 0.02 + nod, 0.01, 0.23, 0.28, 0.24);
+    const neck = capsule([0, HY - 0.34, 0], [0, HY - 0.15 + nod, 0], 0.095);
+    const torso = ellipsoid(0, HY - 0.8, 0, 0.5, 0.5, 0.24), sh = capsule([-0.36, HY - 0.48, 0], [0.36, HY - 0.48, 0], 0.15);
+    const top = group(0, HY - 0.05, 0, 0.5, (x, y, z) => smin(head(x, y, z), neck(x, y, z), 0.06));
+    const person = (x, y, z) => smin(smin(torso(x, y, z), sh(x, y, z), 0.12), top(x, y, z), 0.05);
+    const real = group(PX, PY + HY - 0.45, PZ, 1.0, (x, y, z) => Math.max(person(x - PX, y - PY, z - PZ), 0.15 - y));   // busto, cortado por abajo
+    // el reflejo: la misma persona vista de frente, dentro del cristal
+    const ZR = 2 * MZ - PZ;
+    const toR = (x, y, z) => [(x - RX) / K, HY + (y - RY) / K, -(z - ZR) / K];      // del mundo a la persona reflejada
+    const refl = (x, y, z) => {
+      const clip = Math.max(Math.abs(x - MX) - GW + 0.01, Math.abs(y - MY) - GH + 0.01, z - MZ);
+      if (clip > 0.2) return clip;
+      const [ox, oy, oz] = toR(x, y, z);
+      return Math.max(person(ox, oy, oz) * K, clip);
+    };
+    const mouthH = 0.015 + 0.04 * Math.abs(Math.sin(t * 9)) * (talk > 0.15 ? 1 : 0);
+    return {
+      sdf: (x, y, z) => Math.min(mirror(x, y, z), real(x, y, z), refl(x, y, z)),
+      hole: (x, y, z) => {                                                           // ojos y boca del reflejo
+        if (z > MZ - 0.02) return false;
+        const [ox, oy, oz] = toR(x, y, z);
+        if (oz > -0.1 || oy < HY - 0.3) return false;
+        const ey = HY + 0.04 + nod;
+        if (Math.hypot((ox + 0.09) / 1.3, oy - ey) < 0.04 || Math.hypot((ox - 0.09) / 1.3, oy - ey) < 0.04) return true;
+        return Math.hypot(ox / 0.08, (oy - (HY - 0.13 + nod)) / mouthH) < 1;
+      },
+      tone: (x, y, z) => (z < MZ - 0.02 ? 1 : (mirror(x, y, z) < 0.02 ? 2 : (z > 0 ? -2 : 0)))   // reflejo claro, persona en sombra
+    };
+  }
+}, planar({ x0: -1.05, width: 2.0, z0: -1.4, depth: 2.2, top: 2.2, height: 2.1 }));
+
+/* ===== Forma: una gota de agua que cae sobre un cerebro y salpica (Hidromegalia) ===== */
+const BRAINDROP = Object.assign({
+  center: [0, 0.9, 0], radius: 1.45, basePitch: 0.75, fit: [1.7, 1.7], idle: 'sway', sway: [0.0, 0.25, 0.4],
+  frame(t) {
+    if (!this._brain) {
+      const h1 = ellipsoid(0.02, 0.78, 0.17, 0.66, 0.44, 0.3), h2 = ellipsoid(0.02, 0.78, -0.17, 0.66, 0.44, 0.3);
+      const temporal = ellipsoid(0.12, 0.5, 0, 0.42, 0.22, 0.4), cereb = ellipsoid(-0.46, 0.4, 0, 0.27, 0.17, 0.34);
+      const stem = rcone([-0.22, 0.5, 0], [-0.3, 0.02, 0], 0.11, 0.08);
+      this._brain = group(0, 0.65, 0, 0.95, (x, y, z) => {
+        let d = smin(smin(h1(x, y, z), h2(x, y, z), 0.06), temporal(x, y, z), 0.12);
+        if (y > 0.75) d = Math.max(d, 0.02 - Math.abs(z));                        // la cisura entre hemisferios
+        d += 0.032 * Math.sin(13 * x + 2 * z) * Math.sin(12 * y - 3 * x) * Math.sin(11 * z + 4 * y);   // circunvoluciones
+        d = Math.min(d * 0.7, smin(cereb(x, y, z) + 0.015 * Math.sin(40 * y), stem(x, y, z), 0.06));
+        return Math.max(d, -y);
+      });
+    }
+    const brain = this._brain;
+    const PER = 2.3, tau = t % PER, FALL = 0.85, TOPY = 1.2, X = 0.08;
+    let drop = () => 9;
+    if (tau < FALL) {                                                                // cae con aceleración
+      const k = tau / FALL, y = 1.85 - (1.85 - TOPY - 0.12) * k * k;
+      const ball = (x, yy, z) => Math.hypot(x - X, yy - y, z) - 0.14, tip = rcone([X, y, 0], [X, y + 0.28, 0], 0.135, 0.012);
+      drop = (x, yy, z) => smin(ball(x, yy, z), tip(x, yy, z), 0.04);
+    }
+    // salpicadura: gotitas (letras sueltas) que saltan al chocar
+    const P = [], frac = v => v - Math.floor(v), rnd = i => frac(Math.sin(i * 127.1 + 311.7) * 43758.5453);
+    const s = tau - FALL;
+    if (s > 0 && s < 0.9) for (let i = 0; i < 26; i++) {
+      const a = rnd(i) * TAU, sp = 0.35 + rnd(i + 30) * 0.6, vy = 0.6 + rnd(i + 60) * 0.9;
+      const x = X + Math.cos(a) * sp * s, z = Math.sin(a) * sp * s * 0.8, y = TOPY + 0.05 + vy * s - 2.6 * s * s;
+      if (y > TOPY - 0.25) P.push([x, y, z, s < 0.45 ? 5 : 3, i * 7 + 2]);
+    }
+    const sulcus = (x, y, z) => {                                                     // circunvoluciones: un laberinto de surcos
+      if (y < 0.3 || (x < -0.25 && y < 0.55)) return Math.sin(42 * y) > 0.72 && x < -0.2;   // cerebelo: rayas
+      const g = Math.sin(7 * x + 2.2 * Math.sin(6 * y)) + Math.sin(7 * y + 2.2 * Math.sin(6 * z)) + Math.sin(7 * z + 2.2 * Math.sin(6 * x));
+      return Math.abs(g) < 0.3 || (y > 0.8 && Math.abs(z) < 0.055);                      // y la cisura entre los hemisferios
+    };
+    return {
+      particles: P,
+      sdf: (x, y, z) => Math.min(brain(x, y, z), drop(x, y, z)),
+      hole: (x, y, z) => y < TOPY + 0.12 && sulcus(x, y, z),
+      tone: (x, y, z) => (y > TOPY + 0.1 ? 2 : 0)
+    };
+  }
+}, wrapped({ cx: 0, cz: 0, r: 0.6, top: 2.3, height: 2.3 }));
+
+/* ===== Forma: un teléfono antiguo de rueda; el auricular tiembla como si sonara (Llámame) ===== */
+const PHONE = Object.assign({
+  center: [0, 0.52, -0.02], radius: 1.2, basePitch: 0.3, fit: [1.95, 1.45], idle: 'sway', sway: [0.3, 0.3, 0.4],
+  frame(t) {
+    if (!this._body) {
+      const base = rbox(0, 0.16, 0, 0.58, 0.16, 0.48, 0.08), upper = rbox(0, 0.42, -0.02, 0.48, 0.22, 0.4, 0.15);
+      const SL = 0.35, nrm = Math.hypot(1, SL);
+      const n = [0, 1 / nrm, SL / nrm], c = [0, 0.62 - SL * 0.16 + 0.02, 0.16];      // la rueda, sobre la cara inclinada
+      this._dial = { n, c, t2: [0, n[2], -n[1]] };
+      const dial = (x, y, z) => {
+        const qx = x - c[0], qy = y - c[1], qz = z - c[2], h = qx * n[0] + qy * n[1] + qz * n[2];
+        const rx = qx - n[0] * h, ry = qy - n[1] * h, rz = qz - n[2] * h;
+        return Math.max(Math.hypot(rx, ry, rz) - 0.3, Math.abs(h) - 0.03);
+      };
+      const posts = [-0.36, 0.36].map(px => rbox(px, 0.76, -0.18, 0.05, 0.14, 0.06, 0.02));
+      // cable en espiral, del auricular al costado del teléfono
+      const pts = []; for (let i = 0; i <= 14; i++) { const s = i / 14, a = s * 8 * Math.PI;
+        pts.push([0.74 + 0.06 * Math.cos(a) + 0.04 * s, 0.86 - 0.7 * s, -0.2 - 0.12 * s + 0.06 * Math.sin(a)]); }
+      const cord = pts.slice(1).map((p, i) => capsule(pts[i], p, 0.02));
+      const cordG = group(0.76, 0.5, -0.26, 0.5, (x, y, z) => { let d = 9; for (const s of cord) d = Math.min(d, s(x, y, z)); return d; });
+      this._body = (x, y, z) => {
+        let d = Math.max(smin(base(x, y, z), upper(x, y, z), 0.1), (y - (0.62 - SL * z)) / nrm);
+        d = smin(d, dial(x, y, z), 0.02);
+        for (const p of posts) d = smin(d, p(x, y, z), 0.04);
+        return Math.min(d, cordG(x, y, z));
+      };
+    }
+    // el timbre: dos sacudidas seguidas y una pausa
+    const PER = 3, tau = t % PER, ring = (tau < 0.45 || (tau > 0.6 && tau < 1.05)) ? 1 : 0;
+    const dy = 0.035 * Math.abs(Math.sin(t * 55)) * ring, ang = 0.07 * Math.sin(t * 47) * ring, ca = Math.cos(ang), sa = Math.sin(ang);
+    const HY = 1.0, HZ = -0.18;
+    const handle = capsule([-0.42, HY, HZ], [0.42, HY, HZ], 0.08);
+    const ear = ellipsoid(-0.55, HY - 0.07, HZ, 0.17, 0.13, 0.2), mouth = ellipsoid(0.55, HY - 0.07, HZ, 0.17, 0.13, 0.2);
+    const handset = (x, y, z) => {
+      const yy = y - HY - dy, xx = x * ca + yy * sa, y2 = -x * sa + yy * ca + HY;
+      return smin(handle(xx, y2, z), Math.min(ear(xx, y2, z), mouth(xx, y2, z)), 0.06);
+    };
+    // ondas del timbre: letras que salen de los extremos del auricular
+    const P = [], frac = v => v - Math.floor(v);
+    if (ring) for (let i = 0; i < 10; i++) {
+      const s = frac(tau * 2.2 + i / 10), side = i % 2 ? 1 : -1, a = (i * 0.9) % 2.4 - 1.2;
+      P.push([side * (0.78 + 0.35 * s), HY + 0.05 + 0.3 * s * Math.cos(a), HZ + 0.25 * s * Math.sin(a), s < 0.5 ? 5 : 3, i * 13 + 1]);
+    }
+    const D = this._dial, body = this._body;
+    return {
+      particles: P,
+      sdf: (x, y, z) => Math.min(body(x, y, z), handset(x, y, z)),
+      hole: (x, y, z) => {                                                           // los agujeros de la rueda
+        const qx = x - D.c[0], qy = y - D.c[1], qz = z - D.c[2], h = qx * D.n[0] + qy * D.n[1] + qz * D.n[2];
+        if (h < 0.015) return false;
+        const u = qx, v = qx * D.t2[0] + qy * D.t2[1] + qz * D.t2[2], r = Math.hypot(u, v);
+        if (r > 0.29 || r < 0.13) return false;
+        for (let k = 0; k < 10; k++) { const a = 1.2 + k * 0.5; if (Math.hypot(u - 0.21 * Math.cos(a), v - 0.21 * Math.sin(a)) < 0.042) return true; }
+        return false;
+      },
+      tone: (x, y, z) => (handset(x, y, z) < 0.02 ? 2 : (Math.hypot(x - D.c[0], y - D.c[1], z - D.c[2]) < 0.32 ? 1 : -1))   // auricular y rueda, claros
+    };
+  }
+}, wrapped({ cx: 0, cz: 0, r: 0.6, top: 1.2, height: 1.25 }));
+
+/* ===== Forma: la carta de ajuste de la tele (círculo, rejilla, barras de color y de grises) ===== */
+const TESTCARD = Object.assign({
+  center: [0, 0, 0], radius: 1.6, fit: [2.55, 1.95], idle: 'sway', sway: [0, 0.16, 0.35], swing: 0.4,
+  frame(t) {
+    if (!this._panel) this._panel = rbox(0, 0, 0, 1.2, 0.9, 0.04, 0.03);
+    const R = 0.74, band = 0.95 - ((t * 0.35) % 1) * 2.1;                          // franja de interferencia que baja
+    const cell = (x, y) => {                                                         // → [hueco, tono, color]
+      const r = Math.hypot(x, y);
+      if (Math.abs(x) > 1.12 || Math.abs(y) > 0.82) return [false, 2, 0];           // borde
+      if (Math.abs(r - R) < 0.085) return [false, 3, 0];                             // contorno del círculo
+      if (r > R && r < R + 0.16) return [true, 0, 0];                                // aire alrededor del círculo
+      if (r > R) {                                                                   // fuera: rejilla
+        const gx = Math.abs(((x / 0.32) % 1 + 1) % 1 - 0.5) * 0.32, gy = Math.abs(((y / 0.32) % 1 + 1) % 1 - 0.5) * 0.32;
+        return gx < 0.035 || gy < 0.045 ? [false, 1, 0, 1] : [true, 0, 0];               // rejilla (de puntos)
+      }
+      if (Math.abs(x) < 0.018 || Math.abs(y + 0.03) < 0.014) return [false, 3, 0];   // cruz central
+      if (y > 0.42) return [false, 2, 0];
+      if (y > 0.12) { const k = Math.min(6, Math.floor((x + R) / (2 * R) * 7)); return [false, 2, [0, 2, 3, 4, 5, 1, 6][k]]; }   // barras de color
+      if (y > -0.18) { const k = Math.min(4, Math.floor((x + R) / (2 * R) * 5)); return k === 0 ? [true, 0, 0] : [false, k - 4, 0]; }   // grises
+      if (y > -0.45) return Math.sin(x * (14 + 24 * (x + R))) > 0 ? [false, 1, 0] : [true, 0, 0];   // líneas cada vez más finas
+      return Math.abs(x) < 0.32 && y > -0.62 ? [false, 2, 0] : [true, 0, 0];         // recuadro del canal
+    };
+    const near = y => Math.abs(y - band) < 0.07;
+    return {
+      sdf: (x, y, z) => this._panel(x, y, z),
+      hole: (x, y, z) => z > 0 && cell(x, y)[0],
+      tone: (x, y, z) => (z > 0 ? cell(x, y)[1] - (near(y) ? 2 : 0) : -1),
+      tint: (x, y, z) => (z > 0 ? cell(x, y)[2] : 0),
+      blank: (x, y, z) => z > 0 && cell(x, y)[3] === 1
+    };
+  }
+}, planar({ x0: -1.25, width: 2.5, z0: -0.05, depth: 0.1, top: 0.95, height: 1.9 }));
+
+/* ===== Forma: un sobre que se abre (asoma la carta) y se vuelve a cerrar (Psicoanálisis a la carta) ===== */
+const ENVELOPE = Object.assign({
+  center: [0, 0.18, 0], radius: 1.45, fit: [2.3, 2.15], idle: 'sway', sway: [0.1, 0.22, 0.4], swing: 0.45,
+  frame(t) {
+    const W = 1.0, H = 0.62, D = 0.46, HZ = 0.045;
+    const PER = 6, tau = t % PER;
+    const open = tau < 1.2 ? 0 : tau < 2.0 ? smooth01((tau - 1.2) / 0.8) : tau < 4.5 ? 1 : tau < 5.3 ? 1 - smooth01((tau - 4.5) / 0.8) : 0;
+    const rise = tau < 2.0 ? 0 : tau < 2.7 ? smooth01((tau - 2.0) / 0.7) : tau < 3.9 ? 1 : tau < 4.5 ? 1 - smooth01((tau - 3.9) / 0.6) : 0;
+    const a = open * Math.PI * 0.93, dv = [0, -Math.cos(a), Math.sin(a)], nv = [0, Math.sin(a), Math.cos(a)], K = Math.hypot(D, W);
+    const body = rbox(0, 0, 0, W, H, 0.04, 0.015);
+    const flap = (x, y, z) => {
+      const qy = y - H, qz = z - HZ, along = qy * dv[1] + qz * dv[2], across = qy * nv[1] + qz * nv[2];
+      return Math.max(Math.max(-along, (Math.abs(x) * D - W * (D - along)) / K), Math.abs(across) - 0.012);
+    };
+    const paper = rbox(0, rise * 0.5, 0, W - 0.09, H - 0.05, 0.012, 0.004);
+    const line = (x, y, z) => {                                                      // 2 = carta, 1 = trazo, 0 = relleno
+      if (y > H - 0.01 && body(x, y, z) > 0.01 && flap(x, y, z) > 0.015) return 2;
+      if (flap(x, y, z) < 0.015) {
+        const qy = y - H, qz = z - HZ, along = qy * dv[1] + qz * dv[2];
+        return Math.abs((Math.abs(x) * D - W * (D - along)) / K) < 0.07 || along < 0.05 ? 1 : 0;
+      }
+      if (Math.abs(x) > W - 0.07 || Math.abs(y) > H - 0.07) return 1;                 // contorno
+      return z > 0.03 && Math.abs(y - (-H + (W - Math.abs(x)) * (H * 0.9) / W)) < 0.06 ? 1 : 0;   // costuras
+    };
+    return {
+      sdf: (x, y, z) => Math.min(body(x, y, z), flap(x, y, z), paper(x, y, z)),
+      blank: (x, y, z) => line(x, y, z) === 0,                                       // dibujo a línea: lo demás, puntos
+      tone: (x, y, z) => { const l = line(x, y, z); return l === 2 ? 2 : l === 1 ? 1 : -1; }
+    };
+  }
+}, planar({ x0: -1.05, width: 2.1, z0: -0.1, depth: 0.25, top: 1.2, height: 2.0 }));
+
+/* ===== Forma: un mapa plegado con una mancha de Rorschach dentro (Cartografía de la esquizofrenia) ===== */
+const INKMAP = Object.assign({
+  center: [0, 0, 0], radius: 1.65, basePitch: 0.18, fit: [2.7, 2.05], idle: 'sway', sway: [0, 0.18, 0.35], swing: 0.4,
+  frame(t) {
+    const W = 1.25, H = 0.9;
+    const tri = (v, p) => Math.abs(((v / p) % 2 + 2) % 2 - 1);                      // onda triangular: pliegues
+    const zf = (x, y) => 0.075 * tri(x + W, 0.625) + 0.035 * tri(y + H, 0.9);
+    const paper = (x, y, z) => Math.max(Math.abs(z - zf(x, y)) - 0.016, Math.max(Math.abs(x) - W, Math.abs(y) - H));
+    const B = [[0, 0.4, 0.09], [0, 0.15, 0.1], [0, -0.1, 0.11], [0, -0.36, 0.08],
+               [0.2, 0.3, 0.1], [0.36, 0.38, 0.1], [0.52, 0.45, 0.08], [0.66, 0.5, 0.05], [0.25, 0.05, 0.09], [0.42, 0, 0.07], [0.56, 0.08, 0.05],
+               [0.2, -0.25, 0.09], [0.36, -0.36, 0.08], [0.5, -0.5, 0.05], [0.1, 0.6, 0.035], [0.78, 0.3, 0.03], [0.7, -0.2, 0.03], [0.62, -0.62, 0.025]];
+    const blob = (x, y) => {                                                         // simétrica respecto al pliegue central
+      let F = 0; const ax = Math.abs(x);
+      B.forEach(([cx, cy, r], i) => { const rr = 1.5 * r * r * (1 + 0.1 * Math.sin(t * 0.8 + i * 1.7)); F += (rr / ((ax - cx) ** 2 + (y - cy) ** 2 + 1e-4)) ** 2; });
+      return F;
+    };
+    return {
+      sdf: paper,
+      hole: (x, y, z) => { const e = Math.max(Math.abs(x) - W, Math.abs(y) - H); return e > -0.13 && e < -0.075; },   // doble línea del marco
+      blank: (x, y, z) => blob(x, y) < 0.6 && Math.max(Math.abs(x) - W, Math.abs(y) - H) < -0.06,   // el papel: puntos
+      tone: (x, y, z) => {
+        if (blob(x, y) > 1) return 2;                                                // la mancha, en letras brillantes
+        if (blob(x, y) > 0.6) return 0;
+        if (Math.abs(x) > W - 0.06 || Math.abs(y) > H - 0.06) return 2;              // marco del mapa
+        const gx = Math.abs(((x / 0.31) % 1 + 1) % 1 - 0.5), gy = Math.abs(((y / 0.3) % 1 + 1) % 1 - 0.5);
+        return gx < 0.06 || gy < 0.08 ? 1 : -1;                                      // meridianos y paralelos, puntos más claros
+      }
+    };
+  }
+}, planar({ x0: -1.3, width: 2.6, z0: -0.1, depth: 0.25, top: 0.95, height: 1.9 }));
+
+/* ===== Forma: una mano que escribe en un papel; las letras van apareciendo (¿Qué es el Arte?) ===== */
+const HANDWRITE = {
+  center: [0.25, 0.32, 0.12], radius: 1.75, basePitch: 0.62, fit: [2.45, 1.75], idle: 'sway', sway: [0, 0.14, 0.35], swing: 0.35,
+  W: 0.95, D: 0.7, LINES: 6, X0: -0.82, X1: 0.82,
+  blocks(S, cw, lh) { return [{ cols: Math.ceil(1.9 * S / cw) + 1, rows: 12 }, { cols: 80, rows: 30 }]; },
+  glyph(px, py, pz, nx, ny, nz, g, f) {
+    if (py > 0.02) {                                                                 // la mano y el lápiz
+      const b = g.blocks[1]; let u = (Math.atan2(px - f.hx, pz - f.hz) + 1) / TAU; u -= Math.floor(u);
+      return b.lines[Math.max(0, Math.floor((0.9 - py) / g.rowH)) % b.lines.length][Math.floor(u * b.T) % b.T];
+    }
+    const k = f.lineOf(pz); if (k < 0 || !f.written(px, k)) return ' ';             // papel en blanco: puntos tenues
+    const b = g.blocks[0], col = Math.floor((px - this.X0) / (g.cw / g.S));
+    return b.lines[k % b.lines.length][((col % b.T) + b.T) % b.T];
+  },
+  frame(t) {
+    const W = this.W, D = this.D, N = this.LINES, X0 = this.X0, X1 = this.X1, GAP = 0.2, Z0 = -D + 0.16;
+    const PER = 11, tau = t % PER, prog = Math.min(N, tau / 1.45);                 // escribe 6 renglones y vuelve a empezar
+    const L = Math.min(N - 1, Math.floor(prog)), u = prog >= N ? 1 : prog - L;
+    const tx = X0 + (X1 - X0) * u, tz = Z0 + L * GAP, lift = prog >= N ? 0.12 : 0.012 * Math.abs(Math.sin(t * 26));
+    const tip = [tx, 0.012 + lift, tz];
+    const paper = rbox(0, 0, 0, W, 0.008, D, 0.004);
+    const HS = 2.2, P = (dx, dy, dz) => [tip[0] + dx * HS, tip[1] + dy * HS, tip[2] + dz * HS];
+    const pen = capsule(P(0.03, 0.06, 0.02), P(0.2, 0.62, 0.1), 0.026 * HS), nib = rcone(tip, P(0.03, 0.06, 0.02), 0.004, 0.026 * HS);
+    const palm = ellipsoid(...P(0.27, 0.22, 0.13), 0.2 * HS, 0.11 * HS, 0.17 * HS);
+    const index = capsule(P(0.05, 0.1, 0.0), P(0.2, 0.24, 0.06), 0.042 * HS), thumb = capsule(P(0.06, 0.08, 0.08), P(0.2, 0.18, 0.16), 0.045 * HS);
+    const middle = capsule(P(0.08, 0.06, 0.05), P(0.22, 0.14, 0.12), 0.04 * HS), arm = rcone(P(0.3, 0.24, 0.15), P(0.85, 0.36, 0.55), 0.12 * HS, 0.15 * HS);
+    const hand = group(tip[0] + 0.7, 0.6, tip[2] + 0.5, 1.6, (x, y, z) => {
+      let d = smin(palm(x, y, z), index(x, y, z), 0.05); d = smin(d, thumb(x, y, z), 0.05); d = smin(d, middle(x, y, z), 0.04);
+      d = smin(d, arm(x, y, z), 0.08);
+      return Math.min(d, pen(x, y, z), nib(x, y, z));
+    });
+    const lineOf = z => { const k = Math.round((z - Z0) / GAP); return k >= 0 && k < N && Math.abs(z - (Z0 + k * GAP)) < 0.05 ? k : -1; };
+    const written = (x, k) => x > X0 && x < X1 && (k < L || (k === L && x < tx) || prog >= N);
+    return {
+      hx: tip[0] + 0.4, hz: tip[2] + 0.3, lineOf, written,
+      sdf: (x, y, z) => Math.min(paper(x, y, z), hand(x, y, z)),
+      tone: (x, y, z) => { if (y > 0.02) return 1; const k = lineOf(z); return k >= 0 && written(x, k) ? 2 : -1; }   // lo escrito, brillante
+    };
+  }
+};
+
+/* ===== Entrada: el dibujo de texto se desenreda y forma la entrada; "Redibujar" lo recoge de nuevo ===== */
+(() => {
+  const CONF = JSON.parse(document.getElementById('entry-art').textContent);   // { shape, t, yaw }
+  const SHAPE = ({ eclipse: ECLIPSE, cat: CAT, n85: N85, saturn: SATURN, archery: ARCHERY, mountains: MOUNTAINS, couch: COUCH, boxer: BOXER,
+    trex: TREX, field: FIELD, room: ROOM, moon: MOON, europe: EUROPE, painting: PAINTING, panettone: PANETTONE, storm: STORM, dogs: DOGS,
+    mirror: MIRROR, braindrop: BRAINDROP, phone: PHONE, testcard: TESTCARD, envelope: ENVELOPE, inkmap: INKMAP, handwrite: HANDWRITE })[CONF.shape];
+  const root = document.documentElement;
+  const art = document.querySelector('.article-content');
+  const stage = document.querySelector('.cat-stage');
+  const btn = document.querySelector('.redraw');
+  const caret = document.createElement('span'); caret.className = 'tw-caret'; caret.setAttribute('aria-hidden', 'true');
+  const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const LH = 14;                         // alto de fila del dibujo (px)
+  const OP = [0, .42, .56, .7, .85, 1];  // brillo de cada nivel
+  let state = 'cat', chars = [], fly = [], timers = [], pending = 0, armed = true;
+
+  try {
+    if (!SHAPE) throw new Error('sin dibujo');
+    /* 1. Cada carácter de la entrada pasa a ser un <span>: el texto sigue siendo texto (se selecciona, se copia, los enlaces funcionan) */
+    const walker = document.createTreeWalker(art, NodeFilter.SHOW_TEXT);
+    const nodes = []; let n;
+    while ((n = walker.nextNode())) {
+      if (!n.nodeValue.trim() && (n.parentNode === art || /^(OL|UL|BLOCKQUOTE)$/.test(n.parentNode.nodeName))) continue;   // saltos de línea entre bloques
+      nodes.push(n);
+    }
+    for (const tn of nodes) {
+      const frag = document.createDocumentFragment();
+      for (const ch of tn.nodeValue.replace(/\s+/g, ' ')) {
+        const s = document.createElement('span'); s.className = 'ch h'; s.textContent = ch; frag.appendChild(s); chars.push(s);
+      }
+      tn.parentNode.replaceChild(frag, tn);
+    }
+    art.appendChild(caret);
+    root.classList.remove('cat-pending');
+    buildArt();
+  } catch (e) { root.classList.remove('cat-pending'); chars.forEach(c => c.classList.remove('h')); stage && stage.remove(); art.classList.add('live'); return; }
+
+  /* 2. Dibujar la forma, quieta, con los caracteres de la entrada en orden de lectura */
+  function measure() {
+    const c = document.createElement('canvas').getContext('2d'), cs = getComputedStyle(art);
+    c.font = `${cs.fontSize} ${cs.fontFamily}`;
+    return c.measureText('M').width;
+  }
+  function render(W, H, cw) {
+    const cols = Math.floor(W / cw), rows = Math.floor(H / LH);
+    const S = Math.min(rows * LH / SHAPE.fit[1], cols * cw / SHAPE.fit[0]);
+    const bl = SHAPE.blocks(S, cw, LH).map(b => ({ T: Math.max(1, b.cols), lines: Array.from({ length: Math.max(1, b.rows) }, () => '·'.repeat(Math.max(1, b.cols))) }));
+    const out = new Uint8Array(cols * rows), st = { cols, rows, cw, lh: LH, S, yaw: CONF.yaw || 0, pitch: 0, t: CONF.t || 0,
+      blocks: bl, chars: new Array(cols * rows), tints: new Uint8Array(cols * rows) };
+    renderFrame(SHAPE, st, out);
+    let count = 0; for (let i = 0; i < out.length; i++) if (out[i]) count++;
+    return { cols, rows, out, st, count };
+  }
+  function buildArt() {
+    stage.textContent = '';
+    const cw = measure(), W0 = art.clientWidth;
+    const top = art.getBoundingClientRect().top + scrollY;
+    const H0 = Math.max(320, Math.min(700, innerHeight - (top - scrollY) - 24, W0 * 1.15));
+    // si la entrada es corta y no tiene letras para todo el dibujo, el dibujo se hace más pequeño
+    let k = 1, R = render(W0, H0, cw);
+    for (let i = 0; i < 8 && R.count > chars.length; i++) { k *= Math.sqrt(chars.length / R.count) * 0.97; R = render(W0 * k, H0 * k, cw); }
+    const W = W0, H = Math.max(Math.round(H0 * k), 200);
+    stage.style.height = H + 'px'; art.style.minHeight = H + 'px';
+    const ox = (W - R.cols * cw) / 2, oy = (H - R.rows * LH) / 2;
+    fly = [];
+    let j = 0;
+    for (let r = 0; r < R.rows && j < chars.length; r++) for (let c = 0; c < R.cols && j < chars.length; c++) {
+      const i = r * R.cols + c, lvl = R.out[i]; if (!lvl) continue;
+      const ch = chars[j].textContent, s = document.createElement('span');
+      s.className = R.st.tints[i] ? 'cc t' + R.st.tints[i] : 'cc'; s.textContent = ch === ' ' ? '·' : ch;
+      const o = ch === ' ' ? 0.3 : OP[lvl];
+      s.style.cssText = `left:${ox + c * cw}px;top:${oy + r * LH}px;opacity:${o}`;
+      s._o = o; s._i = j; stage.appendChild(s); fly.push(s); j++;
+    }
+  }
+
+  /* 3. Curvas: un pequeño latigazo hacia arriba y luego caída elástica, como un espagueti */
+  const elastic = t => t <= 0 ? 0 : t >= 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * (2 * Math.PI / 3)) + 1;
+  const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  function pose(it, t) {                                       // posición de una letra en el instante t (0 → dibujo, 1 → texto)
+    const a = Math.min(1, t / 0.2), u = Math.max(0, (t - 0.2) / 0.8);
+    const x = it.dx * ease(Math.min(1, t / 0.5));
+    const y = t < 0.2 ? -it.lift * Math.sin(a * Math.PI / 2) : -it.lift + (it.dy + it.lift) * elastic(u);
+    const r = t < 0.2 ? it.rot * Math.sin(a * Math.PI / 2) : it.rot * (1 - elastic(u));
+    it.s.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px) rotate(${r.toFixed(1)}deg)`;
+    it.s.style.opacity = it.o0 + (1 - it.o0) * Math.min(1, t * 1.6);
+  }
+  // motor propio: un solo bucle por fotograma mueve todas las letras en vuelo
+  let items = [], t0 = 0, loop = 0;
+  function run(list, onAllDone) {
+    items = list; t0 = performance.now();
+    cancelAnimationFrame(loop);
+    const step = now => {
+      const el = now - t0; let alive = 0;
+      for (const it of items) {
+        if (it.fin) continue;
+        const k = (el - it.delay) / it.dur;
+        if (k < 0) { alive++; continue; }
+        if (!it.started) { it.started = true; it.onStart && it.onStart(); }
+        if (k >= 1) { it.fin = true; pose(it, it.back ? 0 : 1); it.onEnd && it.onEnd(); continue; }
+        pose(it, it.back ? 1 - k : k); alive++;
+      }
+      if (alive) loop = requestAnimationFrame(step); else onAllDone && onAllDone();
+    };
+    loop = requestAnimationFrame(step);
+  }
+  // mide de una vez (sin escribir nada entre lecturas) dónde está cada letra del dibujo y su destino en el texto
+  function measureAll(list) {
+    for (const s of list) { s._a = s.getBoundingClientRect(); s._b = chars[s._i].getBoundingClientRect(); }
+  }
+  function lines(list) {
+    const tops = [], map = new Map();
+    for (const s of list) { const t = Math.round(s._b.top); if (!map.has(t)) { map.set(t, []); tops.push(t); } map.get(t).push(s); }
+    tops.sort((a, b) => a - b);
+    return tops.map(t => map.get(t));
+  }
+  const clearAll = () => { timers.forEach(clearTimeout); timers = []; cancelAnimationFrame(loop); items = []; };
+  const item = (s, delay, dur, back) => ({ s, d: chars[s._i], delay, dur, back, dx: s._b.left - s._a.left, dy: s._b.top - s._a.top,
+    rot: (Math.random() * 2 - 1) * 38, lift: 30 + Math.random() * 50, o0: s._o });
+
+  /* 4. Desenredar: línea a línea, cada letra viaja a su sitio con caída elástica */
+  function unravel() {
+    if (state !== 'cat') return;
+    state = 'busy'; stage.classList.add('running'); art.classList.add('live');
+    if (REDUCED) { chars.forEach(c => c.classList.remove('h')); stage.classList.add('gone'); pending = 1; done(); return; }
+    measureAll(fly);
+    const L = lines(fly), LINE = 130, STEP = 7, DUR = 1300, list = [];
+    L.forEach((line, li) => line.forEach((s, j) => {
+      const it = item(s, li * LINE + j * STEP, DUR, false);
+      it.onEnd = () => { it.d.classList.remove('h'); s.style.visibility = 'hidden'; };
+      list.push(it);
+    }));
+    pending = 2;
+    run(list, done);
+    if (fly.length >= chars.length) { done(); return; }          // la entrada cabía entera en el dibujo
+    // la máquina de escribir arranca cuando caen las dos últimas palabras del dibujo
+    const lastLine = L[L.length - 1], tailIdx = Math.max(0, lastLine.length - 12);
+    timers.push(setTimeout(() => typewriter(fly.length), (L.length - 1) * LINE + tailIdx * STEP + DUR * 0.4));
+  }
+  function typewriter(from) {
+    const A = art.getBoundingClientRect(), pos = [];
+    for (let k = from; k < chars.length; k++) { const r = chars[k].getBoundingClientRect(); pos.push([r.right - A.left, r.top - A.top]); }
+    const per = Math.max(2, Math.ceil((chars.length - from) / (60 * 5.5)));     // unos cinco segundos y medio
+    let i = from; caret.classList.add('on');
+    const tick = () => {
+      if (state !== 'busy') return;
+      for (let k = 0; k < per && i < chars.length; k++, i++) chars[i].classList.remove('h');
+      const p = pos[Math.min(i, chars.length) - 1 - from];
+      if (p) caret.style.transform = `translate(${p[0]}px,${p[1]}px)`;
+      if (i < chars.length) requestAnimationFrame(tick); else { caret.classList.remove('on'); done(); }
+    };
+    requestAnimationFrame(tick);
+  }
+  function done() {                          // se llama al acabar la caída y al acabar la máquina de escribir
+    if (--pending > 0) return;
+    timers.push(setTimeout(() => { if (state !== 'busy') return; stage.classList.add('gone'); state = 'text'; btn.hidden = false; }, 300));
+  }
+
+  /* 5. Redibujar: se borra lo escrito a máquina mientras la página sube y, sin pausa, el texto se recoge en el dibujo */
+  function redraw() {
+    if (state !== 'text') return;
+    state = 'back'; btn.hidden = true;
+    window.scrollTo({ top: 0, behavior: REDUCED ? 'auto' : 'smooth' });
+    let i = chars.length;
+    const per = Math.max(6, Math.ceil((chars.length - fly.length) / (60 * 0.45)));
+    const rewind = () => {
+      for (let k = 0; k < per && i > fly.length; k++) chars[--i].classList.add('h');
+      if (i > fly.length) requestAnimationFrame(rewind); else gather();
+    };
+    requestAnimationFrame(rewind);
+  }
+  function gather() {
+    clearAll();
+    stage.classList.remove('gone');
+    if (REDUCED) { chars.forEach(c => c.classList.add('h')); fly.forEach(s => (s.style.visibility = '')); return reset(); }
+    fly.forEach(s => { s.style.transform = 'none'; });            // posición de reposo, para medir bien
+    measureAll(fly);
+    const L = lines(fly).reverse(), LINE = 100, STEP = 5, DUR = 1200, list = [];
+    L.forEach((line, li) => line.slice().reverse().forEach((s, j) => list.push(item(s, li * LINE + j * STEP, DUR, true))));
+    // todas las letras del dibujo aparecen en su sitio del texto, y cada una se despega cuando le toca
+    for (const it of list) { pose(it, 1); it.s.style.visibility = ''; it.d.classList.add('h'); }
+    run(list, reset);
+  }
+  function reset() {
+    clearAll();
+    fly.forEach(s => { s.style.transform = ''; s.style.opacity = s._o; s.style.visibility = ''; });
+    stage.classList.remove('running'); art.classList.remove('live'); state = 'cat';
+    armed = false;   // no se vuelve a desenredar solo si el ratón ya estaba encima: hay que salir del dibujo y volver a entrar
+  }
+
+  stage.addEventListener('pointerenter', e => { if (e.pointerType === 'mouse' && armed) unravel(); });
+  stage.addEventListener('pointerleave', () => { armed = true; });
+  document.addEventListener('pointermove', e => { if (!armed && state === 'cat' && !stage.contains(e.target)) armed = true; });
+  stage.addEventListener('click', unravel);
+  stage.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); unravel(); } });
+  btn.addEventListener('click', redraw);
+  let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (state === 'cat') buildArt(); }, 200); });
+})();
+</script>
 </body>
 </html>
