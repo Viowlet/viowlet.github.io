@@ -60,11 +60,18 @@ color:var(--muted);font-size:13px}
 .footer-copy{justify-self:start}
 .footer-back{justify-self:end;transition:color .2s}
 .footer-back:hover{color:var(--fg)}
+.footer-kofi{transition:color .2s}
+.footer-kofi:hover{color:var(--fg)}
 @media(max-width:600px){
+  footer{grid-template-columns:1fr auto;row-gap:14px}
+  .footer-kofi{grid-column:1/-1;grid-row:2;justify-self:start}
   main{padding-top:105px}
   h1{margin-bottom:48px;font-size:48px}
 }
 </style>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/favicon-32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <script src="../analytics.js" defer></script>
 </head>
 <body>
@@ -90,7 +97,7 @@ color:var(--muted);font-size:13px}
 </main>
 <footer>
   <span class="footer-copy">Violeta Sarabia © 2026</span>
-  <span></span>
+  <a class="footer-kofi" href="https://ko-fi.com/violetasarabia" target="_blank" rel="noopener">Invítame a un café</a>
   <a class="footer-back" href="../index.html">Volver</a>
 </footer>
 <script type="application/json" id="entry-art">{"shape": "cat", "t": 0, "yaw": 0}</script>
