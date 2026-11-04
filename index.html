@@ -189,7 +189,7 @@ footer{
   <a class="entry" href="entries/monodialogo.html" data-slug="monodialogo" data-date="2017-12-03" data-shape="mirror">
     <span class="entry-title">Monodiálogo</span>
   </a>
-  <a class="entry" href="entries/hidromegalia.html" data-slug="hidromegalia" data-date="2016-11-21" data-shape="braindrop">
+  <a class="entry" href="entries/hidromegalia.html" data-slug="hidromegalia" data-date="2016-11-21" data-shape="rain">
     <span class="entry-title">Hidromegalia</span>
   </a>
   <a class="entry" href="entries/llamame.html" data-slug="llamame" data-date="2016-08-04" data-shape="phone">
@@ -1178,6 +1178,29 @@ const BRAINDROP = Object.assign({
   }
 }, wrapped({ cx: 0, cz: 0, r: 0.6, top: 2.3, height: 2.3 }));
 
+/* ===== Forma: lluvia (Hidromegalia): hilos de letras que caen sin parar, sin suelo ===== */
+const RAIN = Object.assign({
+  center: [0, 1.15, 0], radius: 2.0, fit: [2.9, 2.45], idle: 'sway', sway: [0.0, 0.12, 0.3],
+  frame(t) {
+    const frac = v => v - Math.floor(v), rnd = i => frac(Math.sin(i * 127.1 + 311.7) * 43758.5453);
+    if (!this._drops) {
+      this._drops = [];
+      for (let i = 0; i < 70; i++) this._drops.push({ x: (rnd(i * 3 + 1) - 0.5) * 2.7, z: (rnd(i * 3 + 2) - 0.5) * 0.8,
+        v: 2.3 + rnd(i + 90) * 0.9, ph: rnd(i + 200), i, len: 4 + Math.floor(rnd(i + 300) * 3) });
+    }
+    const TOP = 2.55, BOT = -0.5, P = [], SL = 0.06;                                // sin suelo: los hilos salen por abajo y vuelven a entrar por arriba
+    for (const d of this._drops) {
+      const H = TOP - BOT, y = TOP - frac(t * d.v / H + d.ph) * H;
+      for (let j = 0; j < d.len; j++) {
+        const yy = y + j * 0.075;
+        if (yy > TOP || yy < BOT + 0.3) continue;
+        P.push([d.x + SL * yy, yy, d.z, j === 0 ? 5 : j === 1 ? 4 : j < 3 ? 3 : 2, d.i * 7 + j]);
+      }
+    }
+    return { particles: P, sdf: () => 9, tone: () => 0 };
+  }
+}, planar({ x0: -1.4, width: 2.8, z0: -0.5, depth: 1.0, top: 2.3, height: 2.3 }));
+
 /* ===== Forma: un teléfono antiguo de rueda; el auricular tiembla como si sonara (Llámame) ===== */
 const PHONE = Object.assign({
   center: [0, 0.52, -0.02], radius: 1.2, basePitch: 0.3, fit: [1.95, 1.45], idle: 'sway', sway: [0.3, 0.3, 0.4],
@@ -1384,7 +1407,7 @@ const HANDWRITE = {
   const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const TEXTS = JSON.parse(document.getElementById('ascii-text').textContent);
   const SHAPES = { eclipse: ECLIPSE, cat: CAT, n85: N85, saturn: SATURN, archery: ARCHERY, mountains: MOUNTAINS, couch: COUCH, boxer: BOXER, trex: TREX, field: FIELD, room: ROOM, moon: MOON, europe: EUROPE, painting: PAINTING, panettone: PANETTONE, storm: STORM, dogs: DOGS,
-    mirror: MIRROR, braindrop: BRAINDROP, phone: PHONE, testcard: TESTCARD, envelope: ENVELOPE, inkmap: INKMAP, handwrite: HANDWRITE };   // data-shape="cat" → CAT, etc. Añade aquí las demás formas.
+    mirror: MIRROR, braindrop: BRAINDROP, rain: RAIN, phone: PHONE, testcard: TESTCARD, envelope: ENVELOPE, inkmap: INKMAP, handwrite: HANDWRITE };   // data-shape="cat" → CAT, etc. Añade aquí las demás formas.
 
   /* PRETEXT: toda la medición de texto pasa por esta función. Fixedsys es monoespaciada,
      así que basta una medida. Si más adelante usas una fuente proporcional (como en la demo
