@@ -44,10 +44,11 @@ cursor:pointer;padding:0;transition:border-color .2s}
 .transcript{font-size:16px;line-height:1.65;max-width:760px;position:relative}
 .transcript p{margin:0 0 1.5em}
 .transcript p.it{font-style:italic}
-.transcript .w{opacity:0;transition:opacity .25s}
-.transcript .w.v{opacity:1}
+.transcript .c{opacity:0}
+.transcript .c.v{opacity:1}
+.transcript .word{white-space:nowrap}
 .transcript p.empty{display:none}
-.caret{display:inline-block;width:.55em;height:1em;vertical-align:-.15em;background:var(--fg);margin-left:1px;animation:blink .7s steps(1) infinite}
+.caret{position:absolute;left:0;top:0;width:.55em;height:1em;background:var(--fg);pointer-events:none;animation:blink .7s steps(1) infinite}
 .caret.idle{animation:none;opacity:.35}
 @keyframes blink{50%{opacity:0}}
 .hint{color:var(--muted);font-size:13px}
@@ -108,40 +109,61 @@ color:var(--muted);font-size:13px}
   const box = document.querySelector('.transcript');
   const SEG = JSON.parse(document.getElementById('transcript').textContent);
 
-  // Monta el texto: cada palabra es un <span>; cada palabra sabe en qué segundo aparece
-  const words = [], times = [];
-  let p = null;
+  // Monta el texto: cada letra es un <span> y sabe en qué instante aparece (como una máquina de escribir)
+  const wordsT = [];                                               // primero, el instante en que empieza cada palabra
+  SEG.forEach(g => {
+    const ws = g.text.split(/\s+/).filter(Boolean), total = ws.reduce((n, w) => n + w.length, 0) || 1;
+    let acc = 0;
+    ws.forEach((w, k) => { wordsT.push(g.t ? g.t[k] : g.s + (g.e - g.s) * acc / total); acc += w.length; });
+  });
+  const ends = SEG.length ? SEG[SEG.length - 1].e : 0;
+  const CH = 0.07;                                                 // como mucho, 70 ms por letra
+  const chars = [], times = [];
+  let p = null, wi = 0;
   SEG.forEach((g, gi) => {
     if (!p || g.p) { p = document.createElement('p'); if (g.i) p.className = 'it'; box.appendChild(p); }
-    const parts = g.text.split(/(\s+)/).filter(x => x.length);
-    const total = parts.reduce((n, x) => n + (/\s/.test(x) ? 0 : x.length), 0) || 1;
-    let acc = 0, k = 0;
-    parts.forEach(x => {
-      if (/^\s+$/.test(x)) { p.appendChild(document.createTextNode(' ')); return; }
-      const w = document.createElement('span'); w.className = 'w'; w.textContent = x; p.appendChild(w);
-      times.push(g.t ? g.t[k] : g.s + (g.e - g.s) * (acc / total));   // instante de cada palabra (o reparto por longitud)
-      acc += x.length; k++; words.push(w);
+    const ws = g.text.split(/\s+/).filter(Boolean);
+    ws.forEach((w, k) => {
+      if (k) p.appendChild(document.createTextNode(' '));
+      const t0 = wordsT[wi], next = wi + 1 < wordsT.length ? wordsT[wi + 1] : ends;
+      const step = Math.min(CH, Math.max(0.01, (next - t0) * 0.92) / w.length);   // las letras de la palabra antes de que empiece la siguiente
+      const span = document.createElement('span'); span.className = 'word';
+      [...w].forEach((c, j) => {
+        const ch = document.createElement('span'); ch.className = 'c'; ch.textContent = c; span.appendChild(ch);
+        chars.push(ch); times.push(t0 + j * step);
+      });
+      p.appendChild(span); wi++;
     });
     if (gi < SEG.length - 1 && !SEG[gi + 1].p) p.appendChild(document.createTextNode(' '));
   });
-  const caret = document.createElement('span'); caret.className = 'caret idle';
+  const caret = document.createElement('span'); caret.className = 'caret idle'; box.appendChild(caret);
+  function placeCaret(n) {                                         // el cursor va justo detrás de la última letra visible
+    const ref = chars[Math.max(0, n - 1)]; if (!ref) return;
+    const r = ref.getBoundingClientRect(), b = box.getBoundingClientRect();
+    caret.style.left = (n ? r.right - b.left + 1 : r.left - b.left) + 'px';
+    caret.style.top = (r.top - b.top + (r.height - caret.offsetHeight) / 2 + 1) + 'px';
+  }
 
-  let shown = 0;                                                   // cuántas palabras se ven ahora
+  let shown = 0;                                                   // cuántas letras se ven ahora
   const countAt = t => { let lo = 0, hi = times.length; while (lo < hi) { const m = (lo + hi) >> 1; if (times[m] <= t) lo = m + 1; else hi = m; } return lo; };
   let userScroll = -1e9; addEventListener('wheel', () => userScroll = performance.now(), { passive: true }); addEventListener('touchmove', () => userScroll = performance.now(), { passive: true });
   function sync(t) {
     const n = countAt(t);
-    if (n > shown) for (let i = shown; i < n; i++) words[i].classList.add('v');
-    else for (let i = n; i < shown; i++) words[i].classList.remove('v');   // al volver atrás, el texto se recoge
+    if (n > shown) for (let i = shown; i < n; i++) chars[i].classList.add('v');
+    else for (let i = n; i < shown; i++) chars[i].classList.remove('v');   // al volver atrás, el texto se recoge
     if (n !== shown) {
-      shown = n;
-      if (n > 0) words[n - 1].after(caret); else box.prepend(caret);
+      shown = n; placeCaret(n);
       if (!audio.paused && performance.now() - userScroll > 4000) {     // acompaña la lectura si el lector no está moviéndose por su cuenta
         const r = caret.getBoundingClientRect();
         if (r.bottom > innerHeight - 90) scrollBy({ top: r.bottom - innerHeight * 0.55, behavior: 'smooth' });
       }
     }
     hint.hidden = t > 0 || !audio.paused;
+  }
+  addEventListener('resize', () => placeCaret(shown));
+  function follow() {                                              // tras mover la barra, lleva la vista hasta el cursor
+    const r = caret.getBoundingClientRect();
+    if (r.top < 150 || r.bottom > innerHeight - 90) scrollBy({ top: r.top - innerHeight * 0.45, behavior: 'smooth' });
   }
   const fmt = s => { s = Math.max(0, Math.floor(s || 0)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
   function paint(t) {
@@ -156,7 +178,7 @@ color:var(--muted);font-size:13px}
   audio.addEventListener('loadedmetadata', () => { dur.textContent = fmt(audio.duration); bar.setAttribute('aria-valuemax', Math.round(audio.duration)); paint(audio.currentTime); });
   audio.addEventListener('play', () => { btn.classList.add('on'); btn.setAttribute('aria-label', 'Pausa'); caret.classList.remove('idle'); kick(); });
   audio.addEventListener('pause', () => { btn.classList.remove('on'); btn.setAttribute('aria-label', 'Reproducir'); caret.classList.add('idle'); sync(audio.currentTime); paint(audio.currentTime); });
-  audio.addEventListener('seeked', () => { sync(audio.currentTime); paint(audio.currentTime); });
+  audio.addEventListener('seeked', () => { sync(audio.currentTime); paint(audio.currentTime); follow(); });
   audio.addEventListener('ended', () => { sync(audio.duration); paint(audio.duration); });
   btn.addEventListener('click', () => { if (audio.paused) audio.play(); else audio.pause(); });
 
@@ -177,7 +199,8 @@ color:var(--muted);font-size:13px}
   addEventListener('keydown', e => {                               // barra espaciadora: play / pausa
     if (e.code === 'Space' && !/INPUT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); btn.click(); }
   });
-  box.prepend(caret); sync(0);
+  placeCaret(0); sync(0);
+  if (document.fonts) document.fonts.ready.then(() => placeCaret(shown));
 })();
 </script>
 </body>
