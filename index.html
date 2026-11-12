@@ -1506,11 +1506,11 @@ const HANDWRITE = {
   }
 };
 /* ===== Forma: platillo volante en órbita elíptica y oblicua (La nave del misterio) =====
-   Recorre una elipse inclinada: por la izquierda se aleja (más pequeño) y por la derecha se acerca (más grande). */
+   Recorre una elipse inclinada (una vuelta cada 6 s): por la izquierda se aleja (más pequeño) y por la derecha se acerca (más grande). */
 const UFO = Object.assign({
   center: [0, 1.15, 0], radius: 2.0, fit: [2.9, 2.45], idle: 'sway', sway: [0.0, 0.0, 0.0],
   frame(t) {
-    const PER = 9, A = 0.7, B = 0.48, ROT = -0.34, OX = -0.12, OY = 1.12, SZ = 1.5, TILT = 0.22;
+    const PER = 6, A = 0.7, B = 0.48, ROT = -0.34, OX = -0.12, OY = 1.12, SZ = 1.5, TILT = 0.22;
     const orbit = th => {                                                          // posición y escala en la órbita
       const ex = A * Math.cos(th), ey = B * Math.sin(th);
       const x = OX + ex * Math.cos(ROT) - ey * Math.sin(ROT), y = OY + ex * Math.sin(ROT) + ey * Math.cos(ROT);
@@ -1519,7 +1519,6 @@ const UFO = Object.assign({
     };
     const th = -t * TAU / PER, [px, py, k] = orbit(th);
     const bank = 0.18 * Math.sin(th);                                              // se ladea un poco al girar
-    const spin = t * 2.2;                                                          // las luces del borde dan vueltas
     const local = (x, y, z) => {
       let u = (x - px) / k, v = (y - py) / k, w = z / k;
       const c = Math.cos(bank), s = Math.sin(bank); [u, v] = [c * u + s * v, -s * u + c * v];
@@ -1532,26 +1531,12 @@ const UFO = Object.assign({
       return Math.min(smin(disc, Math.max(dome, -v + 0.02), 0.04), base);
     };
     const sdf = (x, y, z) => { const [u, v, w] = local(x, y, z); return hull(u, v, w) * k; };
-    // estela: puntos tenues en las posiciones por las que acaba de pasar
-    const P = [];
-    for (let j = 1; j <= 4; j++) {
-      const [qx, qy, qk] = orbit(th + 0.35 + j * 0.16);
-      P.push([qx, qy, 0, 2, j * 5]);
-    }
-    return {
-      sdf, particles: P,
-      hole: (x, y, z) => {                                                         // ventanas de la cúpula y junta del disco
-        const [u, v, w] = local(x, y, z);
-        if (v > 0.1 && v < 0.17 && w > 0) { const a = Math.atan2(u, w) * 3; return Math.cos(a * 2) > 0.55; }
-        return Math.abs(v - 0.012) < 0.018 && Math.hypot(u, w) > 0.3;
-      },
+    return {                                                                       // silueta limpia: sin luces, ventanas ni estela
+      sdf,
       tone: (x, y, z) => {
         const [u, v, w] = local(x, y, z);
-        if (v > 0.06) return 3;                                                    // cúpula brillante
-        if (Math.abs(v) < 0.07 && Math.hypot(u, w) > 0.42) {                         // luces del borde que giran
-          const a = Math.atan2(w, u) + spin; return Math.cos(a * 6) > 0.6 ? 5 : -1;
-        }
-        return v < -0.04 ? -2 : 0;
+        if (v > 0.06) return 2;                                                    // cúpula, un poco más clara
+        return v < -0.04 ? -1 : 0;
       }
     };
   }
